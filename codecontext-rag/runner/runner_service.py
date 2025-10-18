@@ -1,7 +1,8 @@
 """
 Test Runner Service - Enhanced for remote deployment with auth and observability
+Includes branch management for Strategy C implementation
 """
-from branch_operations import branch_router
+from branch_operations import branch_router, set_repo_store
 from fastapi import FastAPI, HTTPException, BackgroundTasks, Header, Depends, WebSocket
 from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel
@@ -18,6 +19,7 @@ from datetime import datetime, timedelta
 import json
 import logging
 from logging.handlers import RotatingFileHandler
+import subprocess
 
 # Import execution models
 from execution_models import ExecutionConfig, ExecutionResult
@@ -85,13 +87,46 @@ def get_run_logger(run_id: str):
 app = FastAPI(
     title="Test Runner Service",
     version="1.0.0",
-    description="Remote validation runner with LLM debug loop"
+    description="Remote validation runner with LLM debug loop and branch management"
 )
 
 docker_client = docker.from_env()
 
 # In-memory run tracking (use Redis for production scale)
 validation_runs: Dict[str, Dict] = {}
+
+# ============================================================================
+# Repository Store
+# ============================================================================
+
+class InMemoryRepositoryStore:
+    """Simple in-memory store for repository metadata"""
+    
+    def __init__(self):
+        self.repos = {}
+    
+    def get(self, repo_id: str):
+        """Get repository by ID"""
+        return self.repos.get(repo_id)
+    
+    def set(self, repo_id: str, data: dict):
+        """Store repository metadata"""
+        self.repos[repo_id] = data
+    
+    def delete(self, repo_id: str):
+        """Remove repository from store"""
+        if repo_id in self.repos:
+            del self.repos[repo_id]
+    
+    def list(self):
+        """List all repositories"""
+        return list(self.repos.values())
+
+# Create repository store
+repo_store = InMemoryRepositoryStore()
+
+# Inject repository store into branch operations
+set_repo_store(repo_store)
 
 # Metrics tracking
 metrics = {
@@ -102,8 +137,8 @@ metrics = {
     "successful_llm_fixes": 0
 }
 
+# Include branch operations router
 app.include_router(branch_router)
-
 
 # ============================================================================
 # Authentication
@@ -134,6 +169,14 @@ class ValidationRequest(BaseModel):
     github_conn_id: Optional[str] = None
     callback_url: Optional[str] = None  # Optional webhook
     execution: Optional[ExecutionConfig] = None  # Execution configuration
+
+
+class RegisterRepoRequest(BaseModel):
+    """Request to register a repository"""
+    repo_id: str
+    repo_url: str
+    branch: str = "main"
+    github_conn_id: Optional[str] = None  # For authenticated clones via hub
 
 
 class ValidationRun:
@@ -195,6 +238,137 @@ class ValidationRun:
         }
 
 # ============================================================================
+# Repository Management Endpoints
+# ============================================================================
+
+@app.post("/repositories/register", dependencies=[Depends(verify_api_key)])
+async def register_repository(request: RegisterRepoRequest):
+    """
+    Register a repository for branch operations
+    
+    This clones the repo and stores its local path so branch operations
+    can work with it. Required before using branch management endpoints.
+    
+    Uses PAT token for authenticated access via github_conn_id.
+    """
+    # Create a persistent workspace for this repository
+    repo_workspace = WORKSPACE_ROOT / "repos" / request.repo_id
+    repo_workspace.mkdir(parents=True, exist_ok=True)
+    
+    try:
+        repo_path = repo_workspace / "repo"
+        
+        # If already exists, just update the store
+        if repo_path.exists():
+            logger.info(f"Repository already exists: {request.repo_id}, updating store")
+        else:
+            logger.info(f"Registering new repository: {request.repo_id}")
+            
+            # Construct authenticated clone URL using PAT token
+            clone_url = request.repo_url
+            
+            if request.github_conn_id:
+                # Build authenticated URL: https://x-access-token:TOKEN@github.com/user/repo.git
+                # This is GitHub's recommended format for PAT tokens
+                if clone_url.startswith("https://github.com/"):
+                    # Remove https://github.com/ and add token
+                    repo_path_part = clone_url.replace("https://github.com/", "")
+                    if not repo_path_part.endswith(".git"):
+                        repo_path_part += ".git"
+                    # Use x-access-token as username with PAT as password
+                    clone_url = f"https://x-access-token:{request.github_conn_id}@github.com/{repo_path_part}"
+                    logger.info(f"Using authenticated clone URL with PAT token (x-access-token format)")
+                else:
+                    logger.warning(f"Non-GitHub URL provided, cannot add token authentication")
+            else:
+                logger.warning(f"No github_conn_id provided, attempting unauthenticated clone")
+            
+            # Clone the repository
+            result = subprocess.run(
+                ["git", "clone", "--branch", request.branch, clone_url, str(repo_path)],
+                capture_output=True,
+                text=True,
+                timeout=300
+            )
+            
+            if result.returncode != 0:
+                raise Exception(f"Git clone failed: {result.stderr}")
+        
+        # Store repository info
+        repo_store.set(request.repo_id, {
+            "repo_id": request.repo_id,
+            "repo_url": request.repo_url,
+            "local_path": str(repo_path),
+            "branch": request.branch,
+            "github_conn_id": request.github_conn_id,
+            "registered_at": datetime.utcnow().isoformat() + "Z"
+        })
+        
+        logger.info(f"Repository registered successfully: {request.repo_id}")
+        
+        return {
+            "success": True,
+            "repo_id": request.repo_id,
+            "local_path": str(repo_path),
+            "message": "Repository registered successfully"
+        }
+    
+    except Exception as e:
+        logger.error(f"Failed to register repository: {e}")
+        # Cleanup on failure
+        if repo_workspace.exists() and not any(repo_workspace.iterdir()):
+            shutil.rmtree(repo_workspace, ignore_errors=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/repositories", dependencies=[Depends(verify_api_key)])
+async def list_repositories():
+    """List all registered repositories"""
+    return {
+        "success": True,
+        "repositories": repo_store.list(),
+        "count": len(repo_store.list())
+    }
+
+
+@app.get("/repositories/{repo_id}", dependencies=[Depends(verify_api_key)])
+async def get_repository(repo_id: str):
+    """Get details of a specific repository"""
+    repo = repo_store.get(repo_id)
+    if not repo:
+        raise HTTPException(status_code=404, detail="Repository not found")
+    
+    return {
+        "success": True,
+        "repository": repo
+    }
+
+
+@app.delete("/repositories/{repo_id}", dependencies=[Depends(verify_api_key)])
+async def unregister_repository(repo_id: str):
+    """Unregister a repository and cleanup its local clone"""
+    repo = repo_store.get(repo_id)
+    if not repo:
+        raise HTTPException(status_code=404, detail="Repository not found")
+    
+    # Cleanup local path
+    try:
+        local_path = Path(repo["local_path"])
+        if local_path.exists():
+            # Remove the repo directory and its parent if empty
+            shutil.rmtree(local_path.parent, ignore_errors=True)
+            logger.info(f"Cleaned up repository path: {local_path}")
+    except Exception as e:
+        logger.warning(f"Failed to cleanup repository path: {e}")
+    
+    repo_store.delete(repo_id)
+    
+    return {
+        "success": True,
+        "message": f"Repository {repo_id} unregistered"
+    }
+
+# ============================================================================
 # Health & Status Endpoints
 # ============================================================================
 
@@ -205,7 +379,7 @@ async def health_check():
         "status": "healthy",
         "timestamp": datetime.utcnow().isoformat() + "Z",
         "version": "1.0.0",
-        "docker_connected": True  # Could check docker_client.ping()
+        "docker_connected": True
     }
 
 @app.get("/status", dependencies=[Depends(verify_api_key)])
@@ -235,6 +409,7 @@ async def get_status():
             metrics["successful_validations"] / max(1, metrics["total_validations"])
         ) if metrics["total_validations"] > 0 else 0,
         "active_sandboxes": active_sandboxes,
+        "registered_repositories": len(repo_store.list()),
         "recent_runs": [r.to_dict() for r in recent_runs],
         "metrics": metrics
     }
@@ -270,6 +445,8 @@ async def dashboard():
         reverse=True
     )[:20]
     
+    registered_repos = repo_store.list()
+    
     html = f"""
     <!DOCTYPE html>
     <html>
@@ -282,8 +459,9 @@ async def dashboard():
             .metrics {{ display: flex; gap: 20px; margin: 20px 0; }}
             .metric {{ background: white; padding: 20px; border-radius: 5px; flex: 1; text-align: center; }}
             .metric-value {{ font-size: 2em; font-weight: bold; color: #3498db; }}
-            .runs {{ background: white; padding: 20px; border-radius: 5px; }}
+            .section {{ background: white; padding: 20px; border-radius: 5px; margin: 20px 0; }}
             .run {{ padding: 10px; border-bottom: 1px solid #eee; }}
+            .repo {{ padding: 10px; border-bottom: 1px solid #eee; }}
             .status-running {{ color: #f39c12; }}
             .status-completed {{ color: #27ae60; }}
             .status-failed {{ color: #e74c3c; }}
@@ -292,7 +470,7 @@ async def dashboard():
     <body>
         <div class="header">
             <h1>🏃 Test Runner Dashboard</h1>
-            <p>Validation runs with LLM debug loop</p>
+            <p>Validation runs with LLM debug loop & branch management</p>
         </div>
         
         <div class="metrics">
@@ -305,16 +483,29 @@ async def dashboard():
                 <div>Active Now</div>
             </div>
             <div class="metric">
+                <div class="metric-value">{len(registered_repos)}</div>
+                <div>Repositories</div>
+            </div>
+            <div class="metric">
                 <div class="metric-value">{metrics['successful_validations']}</div>
                 <div>Successful</div>
             </div>
-            <div class="metric">
-                <div class="metric-value">{metrics['failed_validations']}</div>
-                <div>Failed</div>
-            </div>
         </div>
         
-        <div class="runs">
+        <div class="section">
+            <h2>Registered Repositories</h2>
+            {''.join([f'''
+            <div class="repo">
+                <strong>{repo['repo_id']}</strong>
+                <br/>
+                <small>URL: {repo['repo_url']}</small>
+                <br/>
+                <small>Branch: {repo['branch']} | Registered: {repo['registered_at']}</small>
+            </div>
+            ''' for repo in registered_repos]) if registered_repos else '<p>No repositories registered yet. Use POST /repositories/register to add one.</p>'}
+        </div>
+        
+        <div class="section">
             <h2>Recent Validations</h2>
             {''.join([f'''
             <div class="run">
@@ -327,10 +518,10 @@ async def dashboard():
                 <br/>
                 <a href="/validate/{run.run_id}/details">View Details</a>
             </div>
-            ''' for run in recent_runs])}
+            ''' for run in recent_runs]) if recent_runs else '<p>No validations yet.</p>'}
         </div>
         
-        <p><small>Auto-refreshes every 5 seconds</small></p>
+        <p><small>Auto-refreshes every 5 seconds | <a href="/docs">API Documentation</a></small></p>
     </body>
     </html>
     """
@@ -372,7 +563,7 @@ async def trigger_validation(
     return {
         "run_id": run_id,
         "status": "started",
-        "branch": request.branch,  # Include branch in response
+        "branch": request.branch,
         "message": "Validation run started in background",
         "status_url": f"/validate/{run_id}",
         "logs_url": f"/validate/{run_id}/logs"
@@ -400,7 +591,7 @@ async def get_validation_details(run_id: str):
     
     return {
         **run.to_dict(),
-        "recent_logs": run.logs[-50:],  # Last 50 log entries
+        "recent_logs": run.logs[-50:],
         "workspace": run.workspace,
         "sandbox_id": run.sandbox
     }
@@ -464,6 +655,39 @@ async def execute_validation(run: ValidationRun):
         )
         run.log(f"Repository cloned to {repo_path}", "INFO")
         
+        # 2.5. Checkout the specified branch
+        if run.request.branch and run.request.branch != "main":
+            run.update_progress(f"Checking out branch: {run.request.branch}")
+            run.log(f"Switching to branch: {run.request.branch}", "INFO")
+            
+            try:
+                # Fetch the branch from remote
+                subprocess.run(
+                    ["git", "fetch", "origin", run.request.branch],
+                    cwd=repo_path,
+                    check=True,
+                    capture_output=True
+                )
+                
+                # Checkout the branch
+                subprocess.run(
+                    ["git", "checkout", run.request.branch],
+                    cwd=repo_path,
+                    check=True,
+                    capture_output=True
+                )
+                
+                run.log(f"Successfully checked out branch: {run.request.branch}", "INFO")
+                
+            except subprocess.CalledProcessError as e:
+                run.log(f"Failed to checkout branch {run.request.branch}: {e.stderr.decode()}", "ERROR")
+                run.status = "error"
+                run.result = {
+                    "success": False,
+                    "error": f"Branch '{run.request.branch}' not found or checkout failed"
+                }
+                return
+
         # 3. Apply patch
         run.update_progress("Applying patch")
         apply_patch(repo_path, run.request.patch, run)
@@ -587,14 +811,15 @@ async def execute_validation(run: ValidationRun):
             run.log(f"Changes committed: {commit_sha[:8]}", "INFO")
             
             run.update_progress("Pushing to origin")
-            push_changes(repo_path, run)
+            push_changes(repo_path, run.request.branch, run)
             run.log("Changes pushed to origin", "INFO")
             
             run.status = "completed"
             run.result = {
                 "success": True,
                 "commit": commit_sha,
-                "attempts": run.attempts
+                "attempts": run.attempts,
+                "branch": run.request.branch
             }
             
             metrics["successful_validations"] += 1
@@ -641,7 +866,8 @@ def setup_workspace(run_id: str, run: ValidationRun) -> Path:
     """Create isolated workspace for this run"""
     workspace = WORKSPACE_ROOT / run_id
     workspace.mkdir(parents=True, exist_ok=True)
-    run.log(f"Workspace directory created: {workspace}", "DEBUG")
+    if run:
+        run.log(f"Workspace directory created: {workspace}", "DEBUG")
     return workspace
 
 
@@ -656,8 +882,6 @@ def cleanup_workspace(workspace_path: str, run: ValidationRun):
 
 def clone_repository(repo_url: str, workspace: Path, branch: str, run: ValidationRun) -> Path:
     """Clone repository into workspace"""
-    import subprocess
-    
     repo_path = workspace / "repo"
     
     run.log(f"Cloning repository: {repo_url} (branch: {branch})", "DEBUG")
@@ -679,8 +903,6 @@ def clone_repository(repo_url: str, workspace: Path, branch: str, run: Validatio
 
 def apply_patch(repo_path: Path, patch: str, run: ValidationRun):
     """Apply unified diff patch"""
-    import subprocess
-    
     patch_file = repo_path / "temp.patch"
     patch_file.write_text(patch)
     
@@ -717,8 +939,6 @@ def apply_patch(repo_path: Path, patch: str, run: ValidationRun):
 
 def reset_repository(repo_path: Path, run: ValidationRun):
     """Reset repository to clean state"""
-    import subprocess
-    
     run.log("Resetting repository to clean state", "DEBUG")
     subprocess.run(["git", "reset", "--hard", "HEAD"], cwd=repo_path)
     subprocess.run(["git", "clean", "-fd"], cwd=repo_path)
@@ -726,8 +946,6 @@ def reset_repository(repo_path: Path, run: ValidationRun):
 
 def commit_changes(repo_path: Path, message: str, run: ValidationRun) -> str:
     """Commit changes and return commit SHA"""
-    import subprocess
-    
     run.log(f"Committing changes: {message}", "DEBUG")
     
     # Configure Git author (use env vars or defaults)
@@ -758,12 +976,10 @@ def commit_changes(repo_path: Path, message: str, run: ValidationRun) -> str:
     return commit_sha
 
 
-def push_changes(repo_path: Path, run: ValidationRun):
+def push_changes(repo_path: Path, branch: str, run: ValidationRun):
     """Push changes to origin"""
-    import subprocess
-    
-    run.log("Pushing changes to remote", "DEBUG")
-    subprocess.run(["git", "push"], cwd=repo_path, timeout=120)
+    run.log(f"Pushing changes to remote branch: {branch}", "DEBUG")
+    subprocess.run(["git", "push", "origin", branch], cwd=repo_path, timeout=120)
 
 
 def detect_language(repo_path: Path, run: ValidationRun) -> str:
@@ -780,7 +996,7 @@ def detect_language(repo_path: Path, run: ValidationRun) -> str:
         return "java"
     else:
         run.log("Defaulting to Python (no clear indicators)", "DEBUG")
-        return "python"  # Default
+        return "python"
 
 
 def create_sandbox(language: str, workspace: Path, run: ValidationRun):
@@ -891,7 +1107,6 @@ def check_syntax(container, language: str, run: ValidationRun) -> Dict:
     cmd = commands.get(language, "echo 'No syntax check'")
     
     run.log(f"Executing syntax check: {cmd[:100]}", "DEBUG")
-    # workdir is already set when container was created
     exit_code, output = container.exec_run(cmd)
     
     result = {
@@ -919,7 +1134,6 @@ def check_build(container, language: str, run: ValidationRun) -> Dict:
     cmd = commands.get(language, "echo 'No build step'")
     
     run.log(f"Executing build check: {cmd[:100]}", "DEBUG")
-    # workdir is already set when container was created  
     exit_code, output = container.exec_run(cmd)
     
     # More lenient for build step
