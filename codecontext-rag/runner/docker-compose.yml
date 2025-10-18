@@ -1,0 +1,37 @@
+# docker-compose.yml
+version: '3.8'
+
+services:
+  # Test Runner Service
+  runner:
+    build: .
+    container_name: codecontext-runner
+    volumes:
+      # Mount Docker socket for Docker-from-Docker
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Persistent workspace
+      - runner_workspace:/workspace
+    environment:
+      - LLM_GATEWAY_URL=http://192.168.0.10:3010
+      - RAG_API_URL=http://192.168.0.9:7998
+      - MAX_VALIDATION_ATTEMPTS=3
+      - SANDBOX_TIMEOUT=600
+      - RUNNER_API_KEY=dev-runner-key-123
+      - RA_API_KEY=dev-456
+      - WORKSPACE_VOLUME_NAME=tst-runner_runner_workspace 
+      - GIT_AUTHOR_NAME=CodeContext Runner
+      - GIT_AUTHOR_EMAIL=runner@mycompany.com
+    ports:
+      - "8001:8001"
+    networks:
+      - codecontext-network
+    restart: unless-stopped
+
+
+volumes:
+  runner_workspace:
+    driver: local
+
+networks:
+  codecontext-network:
+    driver: bridge

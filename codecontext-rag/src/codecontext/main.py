@@ -1,3 +1,4 @@
+# src/codecontext/main.py
 from fastapi import FastAPI, Request
 from starlette.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -7,16 +8,33 @@ import time
 from .config import settings
 from .utils.logging import configure_logging, get_logger
 from .utils.responses import error_response
-from .api.routes import health, repositories, recommendations, dependencies, impact_analysis, search
-from .api.routes import context as context_routes
-from .api.routes import prompts as prompts_routes
-from .api.routes import patches as patches_routes
-from .api.routes import graphs as graphs_routes
-from .api.routes import trace as trace_routes
-from .api.routes import tests as tests_routes
-from .api.routes import segment as segment_routes
-from .api.routes import features as features_routes
-from .api.routes import diagnostics as diagnostics_routes
+
+# Import all route modules
+from .api.routes import (
+    health,
+    repositories,
+    recommendations,
+    dependencies,
+    impact_analysis,
+    search,
+    context,
+    prompts,
+    patches,
+    graphs,
+    trace,
+    tests,
+    segment,
+    features,
+    diagnostics,
+    # NEW ROUTES
+    test_discovery,
+    entity_metadata,
+    symbols,
+    repo_structure,
+    agent_feedback,
+    runner_integration
+)
+
 from .storage.inmemory import InMemoryRepositoryStore, InMemoryJobStore
 from .core.parser import CodeParser
 from .core.embedder import LLMGatewayEmbedder
@@ -25,6 +43,11 @@ from .storage.vector_store import VectorStore
 from .indexing.indexer import Indexer
 from .storage.feature_store import FeatureStore
 from .integrations.llm_gateway import LLMGatewayClient
+
+
+
+
+
 
 logger = get_logger(__name__)
 
@@ -47,27 +70,36 @@ configure_logging(settings.log_level)
 app = FastAPI(
     title="CodeContext RAG API",
     version=settings.api_version,
+    description="Advanced RAG system for code analysis with agent support",
     openapi_url="/openapi.json"
 )
 
+# Initialize core components
 vector_store = VectorStore(settings.lancedb_path)
 parser = CodeParser()
 
 if settings.use_llm_gateway_embeddings:
     logger.info("Using LLM Gateway for embeddings")
-    embedder = LLMGatewayEmbedder(gateway_url=settings.llm_gateway_url, model=settings.embedding_model, dimensions=1536)
+    embedder = LLMGatewayEmbedder(
+        gateway_url=settings.llm_gateway_url,
+        model=settings.embedding_model,
+        dimensions=1536
+    )
 else:
     logger.info("Using local embeddings (fallback)")
-    embedder = LLMGatewayEmbedder(gateway_url=settings.llm_gateway_url, model=settings.embedding_model, dimensions=1536)
+    embedder = LLMGatewayEmbedder(
+        gateway_url=settings.llm_gateway_url,
+        model=settings.embedding_model,
+        dimensions=1536
+    )
 
 ranker = RankingEngine()
-
 repo_store = InMemoryRepositoryStore()
 job_store = InMemoryJobStore(repo_store)
-
 indexer = Indexer(vector_store, parser, embedder, meta_path=settings.index_meta_path)
 indexer.repo_store = repo_store
 
+# Store in app state
 app.state.vector_store = vector_store
 app.state.parser = parser
 app.state.embedder = embedder
@@ -79,6 +111,7 @@ app.state.uptime_seconds = uptime_seconds
 app.state.feature_store = FeatureStore()
 app.state.llm_client = LLMGatewayClient()
 
+# Middleware
 app.add_middleware(RequestIdMiddleware)
 app.add_middleware(
     CORSMiddleware,
@@ -88,22 +121,32 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Register existing routes
 app.include_router(health.router)
 app.include_router(repositories.router)
 app.include_router(recommendations.router)
 app.include_router(dependencies.router)
 app.include_router(impact_analysis.router)
 app.include_router(search.router)
-app.include_router(context_routes.router)
-app.include_router(prompts_routes.router)
-app.include_router(patches_routes.router)
-app.include_router(graphs_routes.router)
-app.include_router(trace_routes.router)
-app.include_router(tests_routes.router)
-app.include_router(segment_routes.router)
-app.include_router(features_routes.router)
-app.include_router(diagnostics_routes.router)
+app.include_router(context.router)
+app.include_router(prompts.router)
+app.include_router(patches.router)
+app.include_router(graphs.router)
+app.include_router(trace.router)
+app.include_router(tests.router)
+app.include_router(segment.router)
+app.include_router(features.router)
+app.include_router(diagnostics.router)
 
+
+
+# Register NEW agent-focused routes
+app.include_router(test_discovery.router)
+app.include_router(entity_metadata.router)
+app.include_router(symbols.router)
+app.include_router(repo_structure.router)
+app.include_router(agent_feedback.router)
+app.include_router(runner_integration.router)
 
 @app.exception_handler(404)
 async def not_found_handler(request: Request, exc):
@@ -112,18 +155,39 @@ async def not_found_handler(request: Request, exc):
 
 @app.exception_handler(422)
 async def validation_error_handler(request: Request, exc):
-    body = error_response(request, code="INVALID_REQUEST", message="Validation error", details={"errors": str(exc)})
+    body = error_response(
+        request,
+        code="INVALID_REQUEST",
+        message="Validation error",
+        details={"errors": str(exc)}
+    )
     return JSONResponse(status_code=400, content=body)
 
 @app.get("/")
 async def root(request: Request):
-    return {"message": "CodeContext RAG API","version": settings.api_version,"status": "running"}
+    return {
+        "message": "CodeContext RAG API - Enhanced for Agents",
+        "version": settings.api_version,
+        "status": "running",
+        "capabilities": [
+            "Code retrieval with advanced context",
+            "Dependency analysis",
+            "Test discovery and coverage",
+            "Symbol lookup",
+            "Repository structure analysis",
+            "Agent feedback learning",
+            "Patch generation and application",
+            "Multi-agent workflows"
+        ]
+    }
 
 @app.on_event("startup")
 async def startup_event():
     logger.info("CodeContext RAG API starting up...")
     logger.info(f"LLM Gateway URL: {settings.llm_gateway_url}")
     logger.info(f"Vector store path: {settings.lancedb_path}")
+    logger.info("Agent-focused APIs enabled")
+    
     try:
         loaded = indexer.load_all_metadata()
         logger.info(f"Loaded index metadata for {loaded} repositories from {settings.index_meta_path}")

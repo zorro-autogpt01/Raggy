@@ -105,6 +105,28 @@ async def add_repository(
             
             logger.info(f"Connection found: {connection}")
             
+            # Fetch the specific authenticated clone URL from GitHub Hub
+            logger.info(f"Fetching authenticated clone URL for connection '{connection_id}'...")
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                clone_response = await client.get(
+                    f"{settings.github_hub_url}/api/connections/{connection_id}/clone_url" # <-- NEW ENDPOINT
+                )
+                
+                if clone_response.status_code == 404:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Clone URL could not be generated: Connection '{connection_id}' is not configured for cloning."
+                    )
+                
+                clone_response.raise_for_status()
+                clone_data = clone_response.json()
+                
+            # Use the authenticated URL for cloning
+            authenticated_repo_url = clone_data.get("clone_url")
+
+            # Determine branch (rest of this section is the same as before)
+            branch = repo_request.branch or connection.get("default_branch") or "main"
+
             # Extract repository information
             repo_url = connection.get("repo_url")
             if not repo_url:
@@ -157,8 +179,9 @@ async def add_repository(
             repo_path = os.path.join(repo_dir, "source")
             
             # Clone the repository
-            logger.info(f"Cloning repository: {repo_url} (branch: {branch}) -> {repo_path}")
-            
+            logger.info(f"Cloning repository: {connection.get('repo_url')} (branch: {branch}) -> {repo_path}")
+            # Note: Log the original URL for security, but use the authenticated one for the process
+                        
             try:
                 result = subprocess.run(
                     [
@@ -166,12 +189,10 @@ async def add_repository(
                         "--depth", "1",
                         "--branch", branch,
                         "--single-branch",
-                        repo_url,
+                        authenticated_repo_url, # <-- USE THE AUTHENTICATED URL HERE
                         repo_path
                     ],
                     capture_output=True,
-                    text=True,
-                    timeout=300
                 )
                 
                 if result.returncode != 0:

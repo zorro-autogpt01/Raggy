@@ -84,6 +84,11 @@ class Settings:
     # Feature extraction
     enable_feature_extraction: bool = _bool(os.getenv("ENABLE_FEATURE_EXTRACTION"), True)
 
+    # Test Runner Integration
+    runner_url: str = os.getenv("RUNNER_URL", "http://192.168.0.7:8001")
+    runner_api_key: str = os.getenv("RUNNER_API_KEY", "dev-runner-key-123")
+    runner_enabled: bool = _bool(os.getenv("RUNNER_ENABLED"), True)
+
     def __post_init__(self):
         self.pre_commit_hooks = _split_list(os.getenv("PRE_COMMIT_HOOKS", ""))
 

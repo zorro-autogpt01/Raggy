@@ -1,0 +1,6 @@
+fastapi
+uvicorn[standard]
+docker
+httpx
+pydantic
+python-multipart
