@@ -32,7 +32,10 @@ from .api.routes import (
     symbols,
     repo_structure,
     agent_feedback,
-    runner_integration
+    runner_integration,
+    task_analyzer_routes,
+    strategy_selector_routes,
+    orchestrator_routes
 )
 
 from .storage.inmemory import InMemoryRepositoryStore, InMemoryJobStore
@@ -43,11 +46,6 @@ from .storage.vector_store import VectorStore
 from .indexing.indexer import Indexer
 from .storage.feature_store import FeatureStore
 from .integrations.llm_gateway import LLMGatewayClient
-
-
-
-
-
 
 logger = get_logger(__name__)
 
@@ -70,7 +68,7 @@ configure_logging(settings.log_level)
 app = FastAPI(
     title="CodeContext RAG API",
     version=settings.api_version,
-    description="Advanced RAG system for code analysis with agent support",
+    description="Advanced RAG system for code analysis with agent support and orchestration",
     openapi_url="/openapi.json"
 )
 
@@ -121,32 +119,43 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Register existing routes
+# Register core routes
 app.include_router(health.router)
 app.include_router(repositories.router)
+app.include_router(search.router)
+app.include_router(context.router)
+
+# Register analysis routes
 app.include_router(recommendations.router)
 app.include_router(dependencies.router)
 app.include_router(impact_analysis.router)
-app.include_router(search.router)
-app.include_router(context.router)
-app.include_router(prompts.router)
-app.include_router(patches.router)
-app.include_router(graphs.router)
-app.include_router(trace.router)
-app.include_router(tests.router)
-app.include_router(segment.router)
-app.include_router(features.router)
 app.include_router(diagnostics.router)
 
+# Register code manipulation routes
+app.include_router(prompts.router)
+app.include_router(patches.router)
 
+# Register visualization routes
+app.include_router(graphs.router)
+app.include_router(trace.router)
 
-# Register NEW agent-focused routes
+# Register testing routes
+app.include_router(tests.router)
 app.include_router(test_discovery.router)
+
+# Register utility routes
+app.include_router(segment.router)
+app.include_router(features.router)
 app.include_router(entity_metadata.router)
 app.include_router(symbols.router)
 app.include_router(repo_structure.router)
+
+# Register agent/workflow routes
 app.include_router(agent_feedback.router)
 app.include_router(runner_integration.router)
+app.include_router(task_analyzer_routes.router)  # ← Grouped with workflow routes
+app.include_router(strategy_selector_routes.router)
+app.include_router(orchestrator_routes.router)
 
 @app.exception_handler(404)
 async def not_found_handler(request: Request, exc):
@@ -177,7 +186,8 @@ async def root(request: Request):
             "Repository structure analysis",
             "Agent feedback learning",
             "Patch generation and application",
-            "Multi-agent workflows"
+            "Multi-agent workflows",
+            "Task analysis and orchestration"  # ← Added
         ]
     }
 
@@ -187,6 +197,7 @@ async def startup_event():
     logger.info(f"LLM Gateway URL: {settings.llm_gateway_url}")
     logger.info(f"Vector store path: {settings.lancedb_path}")
     logger.info("Agent-focused APIs enabled")
+    logger.info("Task orchestration enabled")  # ← Added
     
     try:
         loaded = indexer.load_all_metadata()
