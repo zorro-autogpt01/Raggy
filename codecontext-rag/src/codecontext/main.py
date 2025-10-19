@@ -35,7 +35,8 @@ from .api.routes import (
     task_analyzer_routes,
     strategy_selector_routes,
     orchestrator_routes,
-    metrics
+    metrics,
+    webhooks
 )
 
 from .storage.inmemory import InMemoryRepositoryStore, InMemoryJobStore
@@ -169,6 +170,9 @@ app.include_router(orchestrator_routes.router)
 
 # Register metrics route
 app.include_router(metrics.router)
+
+# Register subscriber github-hub
+app.include_router(webhooks.router) 
 
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request: Request, exc: HTTPException):

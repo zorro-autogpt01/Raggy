@@ -107,160 +107,188 @@ async def add_repository(
             
             # Fetch the specific authenticated clone URL from GitHub Hub
             logger.info(f"Fetching authenticated clone URL for connection '{connection_id}'...")
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                clone_response = await client.get(
-                    f"{settings.github_hub_url}/api/connections/{connection_id}/clone_url" # <-- NEW ENDPOINT
+            clone_response = await client.get(
+                f"{settings.github_hub_url}/api/connections/{connection_id}/clone_url"
+            )
+            
+            if clone_response.status_code == 404:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Clone URL could not be generated: Connection '{connection_id}' is not configured for cloning."
                 )
+            
+            clone_response.raise_for_status()
+            clone_data = clone_response.json()
                 
-                if clone_response.status_code == 404:
-                    raise HTTPException(
-                        status_code=400,
-                        detail=f"Clone URL could not be generated: Connection '{connection_id}' is not configured for cloning."
-                    )
-                
-                clone_response.raise_for_status()
-                clone_data = clone_response.json()
-                
-            # Use the authenticated URL for cloning
-            authenticated_repo_url = clone_data.get("clone_url")
+        # Use the authenticated URL for cloning
+        authenticated_repo_url = clone_data.get("clone_url")
 
-            # Determine branch (rest of this section is the same as before)
-            branch = repo_request.branch or connection.get("default_branch") or "main"
-
-            # Extract repository information
-            repo_url = connection.get("repo_url")
-            if not repo_url:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Connection '{connection_id}' has no repo_url configured"
-                )
+        # Extract repository information
+        repo_url = connection.get("repo_url")
+        if not repo_url:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Connection '{connection_id}' has no repo_url configured"
+            )
+        
+        # Parse owner/repo from URL
+        try:
+            owner, repo_name = parse_repo_url(repo_url)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        
+        # Determine branch
+        branch = repo_request.branch or connection.get("default_branch") or "main"
+        
+        # Check if branch exists in connection
+        available_branches = connection.get("branches", [])
+        if available_branches and branch not in available_branches:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Branch '{branch}' not found. Available: {', '.join(available_branches)}"
+            )
+        
+        # Generate repo_id
+        full_name = f"{owner}/{repo_name}"
+        repo_id = f"{connection_id}_{owner}_{repo_name}".replace("/", "_").replace(" ", "_")
+        
+        # Check if already exists
+        existing = repo_store.get(repo_id)
+        if existing:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Repository {full_name} already exists with ID '{repo_id}'. Use /{repo_id}/reindex to re-index."
+            )
+        
+        # Create repo directory
+        repos_base = os.getenv("REPOS_PATH", "./data/repos")
+        os.makedirs(repos_base, exist_ok=True)
+        
+        repo_dir = os.path.join(repos_base, repo_id)
+        if os.path.exists(repo_dir):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Repository directory already exists: {repo_id}"
+            )
+        
+        os.makedirs(repo_dir, exist_ok=True)
+        repo_path = os.path.join(repo_dir, "source")
+        
+        # Clone the repository
+        logger.info(f"Cloning repository: {connection.get('repo_url')} (branch: {branch}) -> {repo_path}")
+                    
+        try:
+            result = subprocess.run(
+                [
+                    "git", "clone",
+                    "--depth", "1",
+                    "--branch", branch,
+                    "--single-branch",
+                    authenticated_repo_url,
+                    repo_path
+                ],
+                capture_output=True,
+                timeout=300  # 5 minutes
+            )
             
-            # Parse owner/repo from URL
-            try:
-                owner, repo_name = parse_repo_url(repo_url)
-            except ValueError as e:
-                raise HTTPException(status_code=400, detail=str(e))
-            
-            # Determine branch
-            branch = repo_request.branch or connection.get("default_branch") or "main"
-            
-            # Check if branch exists in connection
-            available_branches = connection.get("branches", [])
-            if available_branches and branch not in available_branches:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Branch '{branch}' not found. Available: {', '.join(available_branches)}"
-                )
-            
-            # Generate repo_id
-            full_name = f"{owner}/{repo_name}"
-            repo_id = f"{connection_id}_{owner}_{repo_name}".replace("/", "_").replace(" ", "_")
-            
-            # Check if already exists
-            existing = repo_store.get(repo_id)
-            if existing:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Repository {full_name} already exists with ID '{repo_id}'. Use /{repo_id}/reindex to re-index."
-                )
-            
-            # Create repo directory
-            repos_base = os.getenv("REPOS_PATH", "./data/repos")
-            os.makedirs(repos_base, exist_ok=True)
-            
-            repo_dir = os.path.join(repos_base, repo_id)
-            if os.path.exists(repo_dir):
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Repository directory already exists: {repo_id}"
-                )
-            
-            os.makedirs(repo_dir, exist_ok=True)
-            repo_path = os.path.join(repo_dir, "source")
-            
-            # Clone the repository
-            logger.info(f"Cloning repository: {connection.get('repo_url')} (branch: {branch}) -> {repo_path}")
-            # Note: Log the original URL for security, but use the authenticated one for the process
-                        
-            try:
-                result = subprocess.run(
-                    [
-                        "git", "clone",
-                        "--depth", "1",
-                        "--branch", branch,
-                        "--single-branch",
-                        authenticated_repo_url, # <-- USE THE AUTHENTICATED URL HERE
-                        repo_path
-                    ],
-                    capture_output=True,
-                )
-                
-                if result.returncode != 0:
-                    logger.error(f"Git clone failed: {result.stderr}")
-                    shutil.rmtree(repo_dir, ignore_errors=True)
-                    raise HTTPException(
-                        status_code=500,
-                        detail=f"Git clone failed: {result.stderr}"
-                    )
-                
-                logger.info(f"Repository cloned successfully to {repo_path}")
-                
-            except subprocess.TimeoutExpired:
+            if result.returncode != 0:
+                logger.error(f"Git clone failed: {result.stderr}")
                 shutil.rmtree(repo_dir, ignore_errors=True)
                 raise HTTPException(
                     status_code=500,
-                    detail="Git clone timeout (5 minutes exceeded)"
-                )
-            except Exception as e:
-                shutil.rmtree(repo_dir, ignore_errors=True)
-                raise HTTPException(status_code=500, detail=f"Clone failed: {str(e)}")
-            
-            # Create repository entry
-            repo_data = {
-                "id": repo_id,
-                "owner": owner,
-                "name": repo_name,
-                "full_name": full_name,
-                "branch": branch,
-                "status": "pending",
-                "connection_id": connection_id,
-                "local_path": repo_path,
-                "source_path": repo_path,
-                "github_url": repo_url.replace(".git", ""),
-                "description": connection.get("description"),
-                "created_at": utc_now_iso()
-            }
-            
-            # Store in repo store
-            repo_store.add(repo_data)
-            logger.info(f"Repository {full_name} added successfully with ID: {repo_id}")
-            
-            # Start indexing in background if requested
-            if repo_request.auto_index:
-                logger.info(f"Starting background indexing for {full_name}")
-                
-                job = job_store.enqueue(repo_id, "full", {})
-                repo_store.update(repo_id, {"status": "indexing"})
-                
-                background_tasks.add_task(
-                    index_repository_task,
-                    indexer=indexer,
-                    repo_store=repo_store,
-                    job_store=job_store,
-                    job_id=job["job_id"],
-                    repo_id=repo_id,
-                    repo_path=repo_path
+                    detail=f"Git clone failed: {result.stderr.decode()}"
                 )
             
-            return RepositoryResponse(
-                id=repo_id,
-                owner=owner,
-                name=repo_name,
-                full_name=full_name,
-                branch=branch,
-                status="indexing" if repo_request.auto_index else "pending",
-                indexed_at=None
+            logger.info(f"Repository cloned successfully to {repo_path}")
+            
+        except subprocess.TimeoutExpired:
+            shutil.rmtree(repo_dir, ignore_errors=True)
+            raise HTTPException(
+                status_code=500,
+                detail="Git clone timeout (5 minutes exceeded)"
             )
+        except Exception as e:
+            shutil.rmtree(repo_dir, ignore_errors=True)
+            raise HTTPException(status_code=500, detail=f"Clone failed: {str(e)}")
+        
+        # Create repository entry
+        repo_data = {
+            "id": repo_id,
+            "owner": owner,
+            "name": repo_name,
+            "full_name": full_name,
+            "branch": branch,
+            "status": "pending",
+            "connection_id": connection_id,
+            "local_path": repo_path,
+            "source_path": repo_path,
+            "github_url": repo_url.replace(".git", ""),
+            "description": connection.get("description"),
+            "created_at": utc_now_iso()
+        }
+        
+        # Store in repo store
+        repo_store.add(repo_data)
+        logger.info(f"Repository {full_name} added successfully with ID: {repo_id}")
+        
+        # ✅ SUBSCRIBE TO WEBHOOKS BEFORE STARTING INDEX
+        if settings.github_hub_enabled:
+            try:
+                webhook_url = f"{settings.rag_base_url}/api/webhooks/github-hub"
+                
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    sub_response = await client.post(
+                        f"{settings.github_hub_url}/api/subscriptions",
+                        json={
+                            "url": webhook_url,
+                            "secret": settings.github_hub_webhook_secret,
+                            "events": ["repo.push"],
+                            "conn_id": connection_id,
+                            "branches": [branch],
+                            "active": True
+                        }
+                    )
+                    
+                    if sub_response.status_code == 200:
+                        subscription = sub_response.json()
+                        # Store subscription ID with repo
+                        repo_store.update(repo_id, {
+                            "webhook_subscription_id": subscription.get("id")
+                        })
+                        logger.info(f"✅ Created webhook subscription {subscription.get('id')} for {repo_id}")
+                    else:
+                        logger.warning(f"⚠️ Failed to create webhook subscription: {sub_response.status_code}")
+            
+            except Exception as e:
+                logger.warning(f"⚠️ Could not create webhook subscription: {e}")
+        
+        # Start indexing in background if requested
+        if repo_request.auto_index:
+            logger.info(f"Starting background indexing for {full_name}")
+            
+            job = job_store.enqueue(repo_id, "full", {})
+            repo_store.update(repo_id, {"status": "indexing"})
+            
+            background_tasks.add_task(
+                index_repository_task,
+                indexer=indexer,
+                repo_store=repo_store,
+                job_store=job_store,
+                job_id=job["job_id"],
+                repo_id=repo_id,
+                repo_path=repo_path
+            )
+        
+        # ✅ NOW RETURN (after webhook subscription is created)
+        return RepositoryResponse(
+            id=repo_id,
+            owner=owner,
+            name=repo_name,
+            full_name=full_name,
+            branch=branch,
+            status="indexing" if repo_request.auto_index else "pending",
+            indexed_at=None
+        )
     
     except HTTPException:
         raise

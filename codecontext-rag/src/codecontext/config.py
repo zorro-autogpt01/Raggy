@@ -114,6 +114,9 @@ class Settings:
     embed_cache_ttl_sec: int = int(os.getenv("EMBED_CACHE_TTL_SEC", "600"))
     embed_cache_max_items: int = int(os.getenv("EMBED_CACHE_MAX_ITEMS", "512"))
 
+    rag_base_url: str = os.getenv("RAG_BASE_URL", "http://192.168.0.9:7998")
+    github_hub_webhook_secret: str = os.getenv("GITHUB_HUB_WEBHOOK_SECRET", "dev-webhook-secret")
+
     def __post_init__(self):
         self.pre_commit_hooks = _split_list(os.getenv("PRE_COMMIT_HOOKS", ""))
 
