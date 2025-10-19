@@ -1,3 +1,4 @@
+// codecontext-rag/frontend/src/pages/Recommendations.tsx (Enhanced)
 import React, { useState } from 'react'
 import { Card } from '../components/shared/Card'
 import { Button } from '../components/shared/Button'
@@ -5,7 +6,7 @@ import { Badge } from '../components/shared/Badge'
 import { LoadingSpinner } from '../components/shared/LoadingSpinner'
 import { ErrorMessage } from '../components/shared/ErrorMessage'
 import { api } from '../services/api'
-import { TrendingUp, FileCode, AlertCircle } from 'lucide-react'
+import { TrendingUp, FileCode, AlertCircle, ThumbsUp, ThumbsDown, RefreshCw } from 'lucide-react'
 import type { Repository, FileRecommendation } from '../types/index'
 
 export const Recommendations: React.FC = () => {
@@ -16,8 +17,16 @@ export const Recommendations: React.FC = () => {
   const [recommendations, setRecommendations] = useState<FileRecommendation[]>([])
   const [sessionId, setSessionId] = useState<string>('')
   const [summary, setSummary] = useState<any>(null)
+  const [explanation, setExplanation] = useState<string>('')
+  const [canRefine, setCanRefine] = useState(false)
   const [loading, setLoading] = useState(false)
+  const [interactive, setInteractive] = useState(false)
   const [error, setError] = useState<string>('')
+  const [showFeedback, setShowFeedback] = useState(false)
+  const [relevantFiles, setRelevantFiles] = useState<Set<string>>(new Set())
+  const [irrelevantFiles, setIrrelevantFiles] = useState<Set<string>>(new Set())
+  const [feedbackComments, setFeedbackComments] = useState('')
+  const [refineContext, setRefineContext] = useState('')
 
   React.useEffect(() => {
     loadRepos()
@@ -27,7 +36,7 @@ export const Recommendations: React.FC = () => {
     try {
       const data = await api.listRepositories()
       setRepos(data)
-      if (data.length > 0) {
+      if (data.length > 0 && !selectedRepo) {
         setSelectedRepo(data[0].id)
       }
     } catch (err: any) {
@@ -41,19 +50,99 @@ export const Recommendations: React.FC = () => {
     try {
       setLoading(true)
       setError('')
-      const data = await api.getRecommendations({
+      
+      const endpoint = interactive ? 'interactiveRecommendations' : 'getRecommendations'
+      const data = await api[endpoint]({
         repository_id: selectedRepo,
         query,
         max_results: maxResults
       })
+      
       setRecommendations(data.recommendations || [])
       setSessionId(data.session_id || '')
       setSummary(data.summary || null)
+      setExplanation(data.explanation || '')
+      setCanRefine(data.can_refine || false)
+      setRelevantFiles(new Set())
+      setIrrelevantFiles(new Set())
     } catch (err: any) {
       setError(err.message || 'Failed to get recommendations')
     } finally {
       setLoading(false)
     }
+  }
+
+  const handleRefine = async () => {
+    if (!sessionId || !refineContext) return
+
+    try {
+      setLoading(true)
+      setError('')
+      
+      const data = await api.refineRecommendations({
+        session_id: sessionId,
+        additional_context: refineContext,
+        positive_examples: Array.from(relevantFiles),
+        negative_examples: Array.from(irrelevantFiles),
+        max_results: maxResults
+      })
+      
+      setRecommendations(data.recommendations || [])
+      setExplanation(data.explanation || '')
+      setSummary(data.summary || null)
+      setRefineContext('')
+    } catch (err: any) {
+      setError(err.message || 'Failed to refine recommendations')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const handleSubmitFeedback = async () => {
+    if (!sessionId || !selectedRepo) return
+
+    try {
+      setLoading(true)
+      await api.submitRecommendationFeedback(sessionId, selectedRepo, {
+        relevant_files: Array.from(relevantFiles),
+        irrelevant_files: Array.from(irrelevantFiles),
+        comments: feedbackComments
+      })
+      
+      alert('Feedback submitted successfully!')
+      setShowFeedback(false)
+      setFeedbackComments('')
+    } catch (err: any) {
+      setError(err.message || 'Failed to submit feedback')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const toggleRelevant = (filePath: string) => {
+    setRelevantFiles(prev => {
+      const next = new Set(prev)
+      if (next.has(filePath)) {
+        next.delete(filePath)
+      } else {
+        next.add(filePath)
+        irrelevantFiles.delete(filePath)
+      }
+      return next
+    })
+  }
+
+  const toggleIrrelevant = (filePath: string) => {
+    setIrrelevantFiles(prev => {
+      const next = new Set(prev)
+      if (next.has(filePath)) {
+        next.delete(filePath)
+      } else {
+        next.add(filePath)
+        relevantFiles.delete(filePath)
+      }
+      return next
+    })
   }
 
   const getConfidenceVariant = (confidence: number) => {
@@ -64,7 +153,6 @@ export const Recommendations: React.FC = () => {
 
   return (
     <div className="space-y-6">
-      {/* Search Form */}
       <Card title="Get File Recommendations">
         <div className="space-y-4">
           <div>
@@ -98,8 +186,8 @@ export const Recommendations: React.FC = () => {
             />
           </div>
 
-          <div className="flex items-center gap-4">
-            <div className="flex-1">
+          <div className="grid grid-cols-2 gap-4">
+            <div>
               <label className="block text-sm font-medium text-gray-700 mb-2">
                 Max Results
               </label>
@@ -112,27 +200,36 @@ export const Recommendations: React.FC = () => {
                 className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary-500"
               />
             </div>
-            <div className="pt-7">
-              <Button
-                icon={<TrendingUp className="w-4 h-4" />}
-                onClick={getRecommendations}
-                loading={loading}
-                disabled={!selectedRepo || !query}
-              >
-                Get Recommendations
-              </Button>
+            <div className="flex items-end">
+              <label className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  checked={interactive}
+                  onChange={(e) => setInteractive(e.target.checked)}
+                  className="w-4 h-4"
+                />
+                <span className="text-sm text-gray-700">Use interactive mode (LLM explanations)</span>
+              </label>
             </div>
           </div>
+
+          <Button
+            icon={<TrendingUp className="w-4 h-4" />}
+            onClick={getRecommendations}
+            loading={loading}
+            disabled={!selectedRepo || !query}
+          >
+            Get Recommendations
+          </Button>
         </div>
       </Card>
 
       {error && <ErrorMessage message={error} onRetry={getRecommendations} />}
 
-      {loading ? (
-        <LoadingSpinner text="Analyzing codebase..." />
-      ) : recommendations.length > 0 ? (
+      {loading && <LoadingSpinner text="Analyzing codebase..." />}
+
+      {recommendations.length > 0 && (
         <>
-          {/* Summary */}
           {summary && (
             <Card>
               <div className="grid grid-cols-3 gap-6">
@@ -151,27 +248,145 @@ export const Recommendations: React.FC = () => {
                   <p className="text-sm font-mono text-gray-600">{sessionId.slice(0, 8)}...</p>
                 </div>
               </div>
+
+              {explanation && (
+                <div className="mt-4 p-4 bg-purple-50 border border-purple-200 rounded-lg">
+                  <p className="text-sm text-purple-900">{explanation}</p>
+                </div>
+              )}
             </Card>
           )}
 
-          {/* Results */}
-          <div className="space-y-4">
+          <div className="flex items-center justify-between">
+            <h3 className="text-lg font-semibold text-gray-900">
+              Recommendations ({recommendations.length})
+            </h3>
+            <div className="flex items-center gap-3">
+              {canRefine && (
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  icon={<RefreshCw className="w-4 h-4" />}
+                  onClick={() => setShowFeedback(!showFeedback)}
+                >
+                  {showFeedback ? 'Hide' : 'Refine / Feedback'}
+                </Button>
+              )}
+            </div>
+          </div>
+
+          {showFeedback && (
+            <Card title="Refine Recommendations">
+              <div className="space-y-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                    Additional Context
+                  </label>
+                  <textarea
+                    value={refineContext}
+                    onChange={(e) => setRefineContext(e.target.value)}
+                    rows={3}
+                    placeholder="Add more details to refine recommendations..."
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary-500"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                    Feedback Comments (optional)
+                  </label>
+                  <textarea
+                    value={feedbackComments}
+                    onChange={(e) => setFeedbackComments(e.target.value)}
+                    rows={2}
+                    placeholder="Any additional feedback..."
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary-500"
+                  />
+                </div>
+
+                <div className="flex items-center gap-3">
+                  <Button
+                    onClick={handleRefine}
+                    loading={loading}
+                    disabled={!refineContext}
+                  >
+                    Refine
+                  </Button>
+                  <Button
+                    variant="secondary"
+                    onClick={handleSubmitFeedback}
+                    loading={loading}
+                  >
+                    Submit Feedback
+                  </Button>
+                </div>
+
+                <div className="pt-3 border-t border-gray-200">
+                  <p className="text-sm text-gray-600 mb-2">
+                    Mark files as relevant or irrelevant to improve future recommendations
+                  </p>
+                  <div className="flex items-center gap-4 text-sm text-gray-500">
+                    <span>✓ {relevantFiles.size} relevant</span>
+                    <span>✗ {irrelevantFiles.size} irrelevant</span>
+                  </div>
+                </div>
+              </div>
+            </Card>
+          )}
+
+          <div className="space-y-3">
             {recommendations.map((rec, idx) => (
               <Card key={idx}>
                 <div className="space-y-3">
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-3">
-                      <FileCode className="w-5 h-5 text-primary-600" />
-                      <h3 className="font-semibold text-gray-900">{rec.file_path}</h3>
+                  <div className="flex items-start justify-between">
+                    <div className="flex items-center gap-3 flex-1">
+                      <div className={`w-2 h-2 rounded-full ${
+                        rec.confidence >= 80 ? 'bg-green-400' :
+                        rec.confidence >= 60 ? 'bg-yellow-400' :
+                        'bg-orange-400'
+                      }`}></div>
+                      <div className="flex-1">
+                        <div className="flex items-center gap-2">
+                          <FileCode className="w-4 h-4 text-primary-600" />
+                          <span className="text-white font-medium">{rec.file_path}</span>
+                        </div>
+                      </div>
                     </div>
-                    <Badge variant={getConfidenceVariant(rec.confidence)}>
-                      {rec.confidence}% confidence
-                    </Badge>
+                    <div className="flex items-center gap-3">
+                      <Badge variant={getConfidenceVariant(rec.confidence)}>
+                        {rec.confidence}%
+                      </Badge>
+                      {showFeedback && (
+                        <div className="flex items-center gap-1">
+                          <button
+                            onClick={() => toggleRelevant(rec.file_path)}
+                            className={`p-1 rounded ${
+                              relevantFiles.has(rec.file_path)
+                                ? 'bg-green-100 text-green-700'
+                                : 'text-gray-400 hover:text-green-600'
+                            }`}
+                            title="Mark as relevant"
+                          >
+                            <ThumbsUp className="w-4 h-4" />
+                          </button>
+                          <button
+                            onClick={() => toggleIrrelevant(rec.file_path)}
+                            className={`p-1 rounded ${
+                              irrelevantFiles.has(rec.file_path)
+                                ? 'bg-red-100 text-red-700'
+                                : 'text-gray-400 hover:text-red-600'
+                            }`}
+                            title="Mark as irrelevant"
+                          >
+                            <ThumbsDown className="w-4 h-4" />
+                          </button>
+                        </div>
+                      )}
+                    </div>
                   </div>
 
                   {rec.reasons && rec.reasons.length > 0 && (
                     <div className="space-y-2">
-                      <p className="text-sm font-medium text-gray-700">Why this file?</p>
                       {rec.reasons.map((reason, ridx) => (
                         <div key={ridx} className="flex items-start gap-2 text-sm">
                           <AlertCircle className="w-4 h-4 text-primary-600 mt-0.5 flex-shrink-0" />
@@ -200,7 +415,7 @@ export const Recommendations: React.FC = () => {
             ))}
           </div>
         </>
-      ) : null}
+      )}
     </div>
   )
 }

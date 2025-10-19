@@ -1,8 +1,9 @@
+// codecontext-rag/frontend/src/App.tsx
 import { BrowserRouter, Routes, Route } from 'react-router-dom'
 import { AppProvider } from './context/AppContext'
 import { Layout } from './components/layout/Layout'
 
-// Pages
+// Existing Pages
 import { Dashboard } from './pages/Dashboard'
 import { Repositories } from './pages/Repositories'
 import { Search } from './pages/Search'
@@ -16,6 +17,12 @@ import { Features } from './pages/Features'
 import { ProductAnalysis } from './pages/ProductAnalysis'
 import { ImpactAnalysis } from './pages/ImpactAnalysis'
 import { Tests } from './pages/Tests'
+
+// New Pages
+import { Orchestration } from './pages/Orchestration'
+import { TaskAnalysis } from './pages/TaskAnalysis'
+import { AgentFeedback } from './pages/AgentFeedback'
+import { RunnerValidation } from './pages/RunnerValidation'
 
 function App() {
   return (
@@ -36,6 +43,10 @@ function App() {
             <Route path="product-analysis" element={<ProductAnalysis />} />
             <Route path="impact" element={<ImpactAnalysis />} />
             <Route path="tests" element={<Tests />} />
+            <Route path="orchestration" element={<Orchestration />} />
+            <Route path="task-analysis" element={<TaskAnalysis />} />
+            <Route path="agent-feedback" element={<AgentFeedback />} />
+            <Route path="runner-validation" element={<RunnerValidation />} />
           </Route>
         </Routes>
       </BrowserRouter>

@@ -3,7 +3,7 @@ import { Search, GitBranch, FileCode, Zap, TrendingUp, Settings, Plus, Trash2, R
 import mermaid from 'mermaid';
 
 // API Client
-const API_BASE = 'http://localhost:7998';
+const API_BASE = 'http://192.168.0.9:7998';
 
 const api = {
   async request(endpoint, options = {}) {

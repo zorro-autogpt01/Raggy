@@ -1,149 +1,43 @@
+// codecontext-rag/frontend/src/services/api.ts
 import axios, { AxiosInstance, AxiosRequestConfig } from 'axios'
-import type {
-  Repository,
-  Feature,
-  FeatureSuggestion,
-  ConversationMessage,
-  AgentAnalysis,
-  FileRecommendation,
-  ContextChunk,
-  PatchValidation
-} from '../types/index'
 
-type ListRepositoriesResponse = Repository[]
-
-type ListFeaturesResponse = {
-  repo_id: string
-  total_features: number
-  features: Feature[]
-}
-
-type ListSuggestionsResponse = {
-  repo_id: string
-  total_suggestions: number
-  suggestions: FeatureSuggestion[]
-}
-
-type ListAnalysesResponse = {
-  repo_id: string
-  total_analyses: number
-  analyses: AgentAnalysis[]
-}
-
-type GetSuggestionDetailResponse = {
-  suggestion: FeatureSuggestion
-  conversation: ConversationMessage[]
-}
-
-type RecommendationsResponse = {
-  session_id: string
-  query: string
-  recommendations: FileRecommendation[]
-  summary?: { total_files: number; avg_confidence: number }
-}
-
-type DependenciesResponse =
-  | {
-      file_path: string
-      graph_text: string
-      format: 'mermaid' | 'plantuml'
-      statistics: { total_dependencies: number; depth: number; circular_dependencies: any[] }
-    }
-  | {
-      file_path: string
-      graph: any
-      statistics: { total_dependencies: number; depth: number; circular_dependencies: any[] }
-    }
-
-type GraphResponse =
-  | { type: string; format: 'mermaid' | 'plantuml'; graph_text: string }
-  | { type: string; graph: any }
-
-type ContextResponse = {
-  query: string
-  chunks: ContextChunk[]
-  summary?: { total_chunks: number; avg_confidence: number; retrieval_mode: string }
-  artifacts?: any[]
-}
-
-type PromptResponse = {
-  query: string
-  model?: string
-  messages: Array<{ role: string; content: string; meta?: any }>
-  selected_chunks: Array<{
-    id: string
-    file_path: string
-    start_line: number
-    end_line: number
-    language: string
-    confidence: number
-    reasons?: any[]
-  }>
-  token_usage: any
-  summary?: any
-  artifacts?: any[]
-}
-
-type PatchResponse = {
-  model?: string
-  messages_used: number
-  patch?: string | null
-  dry_run: boolean
-  validation: PatchValidation
-  summary?: any
-}
-
-type ApplyPatchResponse = {
-  base_branch: string
-  new_branch?: string
-  commit?: string | null
-  pushed: boolean
-  pr_created: boolean
-  pr?: any
-  validation: any
-  logs: string[]
-  summary?: any
-}
-
-type ImpactAnalysisResponse = {
-  modified_files: string[]
-  impact: {
-    risk_level: string
-    affected_files: Array<{ file_path: string; impact_type: string; distance: number; confidence: number }>
-    test_files: string[]
-    recommendations: string[]
-    statistics: { total_affected: number; direct_dependencies: number; transitive_dependencies: number }
-  }
-}
-
-type SearchCodeResponse = {
-  query: string
-  results: Array<{
-    file_path: string
-    entity_type: string
-    entity_name?: string
-    similarity_score: number
-    code_snippet: string
-    line_number: number
-  }>
-  total_results: number
-}
+// Helper to get API key from localStorage
+const getToken = () => localStorage.getItem('api_key')
 
 class ApiService {
   private client: AxiosInstance
 
   constructor() {
-    // Default to nginx proxy path in production to avoid hardcoding host:port.
-    const baseURL = import.meta.env.VITE_API_BASE || '/api'
+    const baseURL = import.meta.env.VITE_API_BASE || 'http://192.168.0.9:7998'
     this.client = axios.create({
       baseURL,
       headers: { 'Content-Type': 'application/json' }
     })
 
-    const apiKey = import.meta.env.VITE_API_KEY
-    if (apiKey) {
-      this.client.defaults.headers.common['Authorization'] = `Bearer ${apiKey}`
-    }
+    // Add auth interceptor
+    this.client.interceptors.request.use((config) => {
+      const token = getToken()
+      if (token) {
+        config.headers.Authorization = `Bearer ${token}`
+      }
+      return config
+    })
+
+    // Add response interceptor for 401 handling
+    this.client.interceptors.response.use(
+      (response) => response,
+      async (error) => {
+        if (error.response?.status === 401) {
+          const apiKey = prompt('Please enter your API key:')
+          if (apiKey) {
+            localStorage.setItem('api_key', apiKey)
+            error.config.headers.Authorization = `Bearer ${apiKey}`
+            return this.client.request(error.config)
+          }
+        }
+        throw error
+      }
+    )
   }
 
   private async request<T>(
@@ -151,134 +45,333 @@ class ApiService {
     url: string,
     options: { data?: any; params?: any } = {}
   ): Promise<T> {
-    const config: AxiosRequestConfig = {
-      method,
-      url,
-      params: options.params,
-      data: options.data
-    }
-    const response = await this.client.request(config)
-    const body = response.data
+    try {
+      const config: AxiosRequestConfig = {
+        method,
+        url,
+        params: options.params,
+        data: options.data
+      }
+      const response = await this.client.request(config)
+      const body = response.data
 
-    if (body && typeof body === 'object' && 'success' in body && 'data' in body) {
-      return body.data as T
+      // Handle both envelope and raw responses
+      if (body && typeof body === 'object' && 'success' in body && 'data' in body) {
+        return body.data as T
+      }
+      return body as T
+    } catch (error: any) {
+      const requestId = error.response?.headers?.['x-request-id'] || 
+                      error.response?.data?.metadata?.request_id
+      const message = error.response?.data?.error?.message || 
+                    error.response?.data?.message || 
+                    error.message
+      const code = error.response?.data?.error?.code || String(error.response?.status || 'UNKNOWN')
+      
+      throw {
+        status: error.response?.status,
+        code,
+        message,
+        requestId  // Now it's used in the throw
+      }
     }
-    return body as T
   }
 
-  async health(): Promise<any> {
+  // Streaming helper for patches
+  async streamPatch(
+    repoId: string,
+    data: any,
+    onChunk: (chunk: string) => void,
+    signal?: AbortSignal
+  ): Promise<void> {
+    const response = await fetch(`${this.client.defaults.baseURL}/repositories/${repoId}/patch`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(getToken() ? { Authorization: `Bearer ${getToken()}` } : {})
+      },
+      body: JSON.stringify({ ...data, stream: true }),
+      signal
+    })
+
+    if (!response.ok) throw new Error(`Stream failed: ${response.statusText}`)
+    
+    const reader = response.body?.getReader()
+    const decoder = new TextDecoder()
+    
+    if (!reader) throw new Error('No reader available')
+    
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      onChunk(decoder.decode(value, { stream: true }))
+    }
+  }
+
+  // Polling helper
+  async poll<T>(
+    url: string,
+    stopWhen: (data: T) => boolean,
+    intervalMs = 1500,
+    maxAttempts = 60
+  ): Promise<T> {
+    let attempts = 0
+    while (attempts < maxAttempts) {
+      const data = await this.request<T>('GET', url)
+      if (stopWhen(data)) return data
+      await new Promise(resolve => setTimeout(resolve, intervalMs))
+      attempts++
+    }
+    throw new Error('Polling timeout')
+  }
+
+  // Health & Metrics
+  async health() {
     return this.request<any>('GET', '/health')
   }
 
-  async listRepositories(params?: any): Promise<ListRepositoriesResponse> {
-    return this.request<ListRepositoriesResponse>('GET', '/repositories', { params })
+  async metrics() {
+    return this.request<any>('GET', '/metrics')
   }
 
-  async addRepository(data: { connection_id: string; branch?: string; auto_index?: boolean }): Promise<Repository> {
-    return this.request<Repository>('POST', '/repositories', { data })
+  async searchHealth() {
+    return this.request<any>('GET', '/search/health')
   }
 
-  async getRepository(id: string): Promise<Repository> {
-    return this.request<Repository>('GET', `/repositories/${id}`)
+  // Repositories
+  async listRepositories(params?: any) {
+    return this.request<any[]>('GET', '/repositories', { params })
   }
 
-  async deleteRepository(id: string): Promise<{ message: string } | any> {
-    return this.request('DELETE', `/repositories/${id}`)
+  async addRepository(data: any) {
+    return this.request<any>('POST', '/repositories', { data })
   }
 
-  async reindexRepository(id: string): Promise<{ message: string; job_id: string }> {
-    return this.request('POST', `/repositories/${id}/reindex`)
+  async getRepository(id: string) {
+    return this.request<any>('GET', `/repositories/${id}`)
   }
 
-  async getIndexStatus(id: string): Promise<any> {
-    return this.request('GET', `/repositories/${id}/index/status`)
+  async deleteRepository(id: string) {
+    return this.request<any>('DELETE', `/repositories/${id}`)
   }
 
-  async listFeatures(repoId: string, params?: any): Promise<ListFeaturesResponse> {
-    return this.request<ListFeaturesResponse>('GET', `/features/${repoId}`, { params })
+  async reindexRepository(id: string) {
+    return this.request<any>('POST', `/repositories/${id}/reindex`)
   }
 
-  async listSuggestions(repoId: string, params?: any): Promise<ListSuggestionsResponse> {
-    return this.request<ListSuggestionsResponse>('GET', `/features/${repoId}/suggestions`, { params })
+  async getIndexStatus(id: string) {
+    return this.request<any>('GET', `/repositories/${id}/index/status`)
   }
 
-  async getSuggestionDetail(repoId: string, suggestionId: string): Promise<GetSuggestionDetailResponse> {
-    return this.request<GetSuggestionDetailResponse>('GET', `/features/${repoId}/suggestions/${suggestionId}`)
+  // Context & Retrieval
+  async getContext(repoId: string, data: any) {
+    return this.request<any>('POST', `/repositories/${repoId}/context`, { data })
   }
 
-  async updateSuggestionStatus(repoId: string, suggestionId: string, status: string): Promise<{ status: string; updated: boolean }> {
-    return this.request('POST', `/features/${repoId}/suggestions/${suggestionId}/status`, {
-      params: { status }
+  // Prompts
+  async buildPrompt(repoId: string, data: any) {
+    return this.request<any>('POST', `/repositories/${repoId}/prompt`, { data })
+  }
+
+  // Patches
+  async generatePatch(repoId: string, data: any) {
+    return this.request<any>('POST', `/repositories/${repoId}/patch`, { data })
+  }
+
+  async applyPatch(repoId: string, data: any) {
+    return this.request<any>('POST', `/repositories/${repoId}/apply-patch`, { data })
+  }
+
+  async segmentPatch(repoId: string, patch: string) {
+    return this.request<any>('POST', `/repositories/${repoId}/patch/segment`, { data: { patch } })
+  }
+
+  // Search
+  async searchCode(data: any) {
+    return this.request<any>('POST', '/search/code', { data })
+  }
+
+  // Recommendations
+  async getRecommendations(data: any) {
+    return this.request<any>('POST', '/recommendations', { data })
+  }
+
+  async interactiveRecommendations(data: any) {
+    return this.request<any>('POST', '/recommendations/interactive', { data })
+  }
+
+  async refineRecommendations(data: any) {
+    return this.request<any>('POST', '/recommendations/refine', { data })
+  }
+
+  async submitRecommendationFeedback(sessionId: string, repoId: string, data: any) {
+    return this.request<any>('POST', `/recommendations/${sessionId}/feedback`, { 
+      params: { repo_id: repoId },
+      data 
     })
   }
 
-  async listAnalyses(repoId: string, agentRole?: string): Promise<ListAnalysesResponse> {
-    const params = agentRole ? { agent_role: agentRole } : undefined
-    return this.request<ListAnalysesResponse>('GET', `/features/${repoId}/analyses`, { params })
+  // Features & Product
+  async listFeatures(repoId: string, params?: any) {
+    return this.request<any>('GET', `/features/${repoId}`, { params })
   }
 
-  async triggerProductAnalysis(repoId: string, skipFeatureExtraction = false): Promise<{ repo_id: string; status: string; message: string }> {
-    return this.request('POST', `/features/${repoId}/analyze`, {
+  async listAnalyses(repoId: string, agentRole?: string) {
+    return this.request<any>('GET', `/features/${repoId}/analyses`, { 
+      params: agentRole ? { agent_role: agentRole } : undefined 
+    })
+  }
+
+  async triggerProductAnalysis(repoId: string, skipFeatureExtraction = false) {
+    return this.request<any>('POST', `/features/${repoId}/analyze`, {
       data: { repo_id: repoId, skip_feature_extraction: skipFeatureExtraction }
     })
   }
 
-  async getRecommendations(data: { repository_id: string; query: string; max_results?: number }): Promise<RecommendationsResponse> {
-    return this.request<RecommendationsResponse>('POST', '/recommendations', { data })
+  async listSuggestions(repoId: string, params?: any) {
+    return this.request<any>('GET', `/features/${repoId}/suggestions`, { params })
   }
 
-  async submitFeedback(sessionId: string, data: any): Promise<{ recorded: boolean; message: string }> {
-    return this.request('POST', `/recommendations/${sessionId}/feedback`, { data })
+  async getSuggestionDetail(repoId: string, suggestionId: string) {
+    return this.request<any>('GET', `/features/${repoId}/suggestions/${suggestionId}`)
   }
 
-  async refineRecommendations(data: any): Promise<RecommendationsResponse> {
-    return this.request<RecommendationsResponse>('POST', '/recommendations/refine', { data })
-  }
-
-  async searchCode(data: any): Promise<SearchCodeResponse> {
-    return this.request<SearchCodeResponse>('POST', '/search/code', { data })
-  }
-
-  async getDependencies(filePath: string, repoId: string, depth = 2, format: 'json' | 'mermaid' | 'plantuml' = 'json'): Promise<DependenciesResponse> {
-    const encoded = encodeURIComponent(filePath)
-    return this.request<DependenciesResponse>('GET', `/dependencies/${encoded}`, {
-      params: { repository_id: repoId, depth, direction: 'both', format }
+  async updateSuggestionStatus(repoId: string, suggestionId: string, status: string) {
+    return this.request<any>('POST', `/features/${repoId}/suggestions/${suggestionId}/status`, {
+      params: { status }
     })
   }
 
-  async getGraph(repoId: string, type: string, format: 'json' | 'mermaid' | 'plantuml' = 'json', nodeFilter = '', depth = 0): Promise<GraphResponse> {
+  // Graphs & Dependencies
+  async getGraph(repoId: string, type: string, format = 'json', nodeFilter = '', depth = 0) {
     const params: any = { type, format }
     if (nodeFilter) params.node_filter = nodeFilter
     if (depth) params.depth = depth
-    return this.request<GraphResponse>('GET', `/repositories/${repoId}/graphs`, { params })
+    return this.request<any>('GET', `/repositories/${repoId}/graphs`, { params })
   }
 
-  async getContext(repoId: string, data: any): Promise<ContextResponse> {
-    return this.request<ContextResponse>('POST', `/repositories/${repoId}/context`, { data })
+  async getGraphSummary(repoId: string) {
+    return this.request<any>('GET', `/repositories/${repoId}/graphs/summary`)
   }
 
-  async buildPrompt(repoId: string, data: any): Promise<PromptResponse> {
-    return this.request<PromptResponse>('POST', `/repositories/${repoId}/prompt`, { data })
+  async reloadGraphs(repoId: string) {
+    return this.request<any>('POST', `/repositories/${repoId}/graphs/reload`)
   }
 
-  async generatePatch(repoId: string, data: any): Promise<PatchResponse> {
-    return this.request<PatchResponse>('POST', `/repositories/${repoId}/patch`, { data })
+  async getDependencies(filePath: string, repoId: string, depth = 2, direction = 'both', format = 'json') {
+    const encoded = encodeURIComponent(filePath)
+    return this.request<any>('GET', `/dependencies/${encoded}`, {
+      params: { repository_id: repoId, depth, direction, format }
+    })
   }
 
-  async applyPatch(repoId: string, data: any): Promise<ApplyPatchResponse> {
-    return this.request<ApplyPatchResponse>('POST', `/repositories/${repoId}/apply-patch`, { data })
+  // Entity & File Metadata
+  async getEntity(repoId: string, entityId: string) {
+    return this.request<any>('GET', `/repositories/${repoId}/entities/${entityId}`)
   }
 
-  async analyzeImpact(data: { repository_id: string; modified_files: string[]; analysis_depth?: number; options?: any }): Promise<ImpactAnalysisResponse> {
-    return this.request<ImpactAnalysisResponse>('POST', '/impact-analysis', { data })
+  async getFileMetadata(repoId: string, filePath: string) {
+    const encoded = filePath.split('/').map(encodeURIComponent).join('/')
+    return this.request<any>('GET', `/repositories/${repoId}/files/${encoded}/metadata`)
   }
 
-  async selectTests(repoId: string, data: any): Promise<{ modified_files: string[]; ranked_tests: Array<{ test: string; score: number }> }> {
-    return this.request('POST', `/repositories/${repoId}/tests/select`, { data })
+  async getSymbolDefinition(repoId: string, symbolName: string, contextFile?: string) {
+    return this.request<any>('GET', `/repositories/${repoId}/symbols/definition`, {
+      params: { symbol_name: symbolName, context_file: contextFile }
+    })
   }
 
-  async runTests(repoId: string, data: any): Promise<{ ok: boolean; output: string }> {
-    return this.request('POST', `/repositories/${repoId}/tests/run`, { data })
+  async getSymbolUsages(repoId: string, symbolName: string) {
+    return this.request<any>('GET', `/repositories/${repoId}/symbols/usages`, {
+      params: { symbol_name: symbolName }
+    })
+  }
+
+  // Tests
+  async getTestCoverage(repoId: string, filePath?: string, functionName?: string) {
+    return this.request<any>('GET', `/repositories/${repoId}/tests/coverage`, {
+      params: { file_path: filePath, function_name: functionName }
+    })
+  }
+
+  async selectTests(repoId: string, data: any) {
+    return this.request<any>('POST', `/repositories/${repoId}/tests/select`, { data })
+  }
+
+  async runTests(repoId: string, data: any) {
+    return this.request<any>('POST', `/repositories/${repoId}/tests/run`, { data })
+  }
+
+  // Impact Analysis
+  async analyzeImpact(data: any) {
+    return this.request<any>('POST', '/impact-analysis', { data })
+  }
+
+  // Runner Validation
+  async validateWithRunner(data: any) {
+    return this.request<any>('POST', '/runner/validate', { data })
+  }
+
+  async getValidationStatus(runId: string) {
+    return this.request<any>('GET', `/runner/validate/${runId}`)
+  }
+
+  // Python Tracing
+  async tracePython(repoId: string, data: any) {
+    return this.request<any>('POST', `/repositories/${repoId}/trace/python`, { data })
+  }
+
+  // Agent Feedback
+  async submitExecutionFeedback(data: any) {
+    return this.request<any>('POST', '/agent/feedback/execution', { data })
+  }
+
+  async submitChangeFeedback(data: any) {
+    return this.request<any>('POST', '/agent/feedback/change', { data })
+  }
+
+  async getFeedbackSummary(repoId?: string, feedbackType?: string) {
+    return this.request<any>('GET', '/agent/feedback/summary', {
+      params: { repo_id: repoId, feedback_type: feedbackType }
+    })
+  }
+
+  async getRetrievalProfile(repoId: string) {
+    return this.request<any>('GET', '/agent/feedback/profile', {
+      params: { repo_id: repoId }
+    })
+  }
+
+  // Strategy & Task Analysis
+  async analyzeTask(data: any) {
+    return this.request<any>('POST', '/api/analyze/task', { data })
+  }
+
+  async quickClassifyTask(data: any) {
+    return this.request<any>('POST', '/api/analyze/quick-classify', { data })
+  }
+
+  async selectStrategy(data: any) {
+    return this.request<any>('POST', '/api/strategy/select', { data })
+  }
+
+  async getStrategyRules() {
+    return this.request<any>('GET', '/api/strategy/rules')
+  }
+
+  // Orchestration
+  async executeOrchestration(data: any) {
+    return this.request<any>('POST', '/api/orchestrate/execute', { data })
+  }
+
+  async getOrchestrationStatus(executionId: string) {
+    return this.request<any>('GET', `/api/orchestrate/status/${executionId}`)
+  }
+
+  async listOrchestrations(repoId?: string) {
+    return this.request<any>('GET', '/api/orchestrate/executions', {
+      params: repoId ? { repo_id: repoId } : undefined
+    })
   }
 }
 

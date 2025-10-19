@@ -1,33 +1,46 @@
-import React, { useState } from 'react'
+// codecontext-rag/frontend/src/pages/Patches.tsx (Enhanced)
+import React, { useState, useRef } from 'react'
 import { Card } from '../components/shared/Card'
 import { Button } from '../components/shared/Button'
 import { Badge } from '../components/shared/Badge'
 import { LoadingSpinner } from '../components/shared/LoadingSpinner'
 import { ErrorMessage } from '../components/shared/ErrorMessage'
-import { CodeBlock } from '../components/shared/CodeBlock'
 import { api } from '../services/api'
-import { GitPullRequest, CheckCircle, XCircle } from 'lucide-react'
+import { GitPullRequest, CheckCircle, XCircle, Copy, Check, StopCircle, Layers } from 'lucide-react'
 import type { Repository } from '../types/index'
+import { useClipboard } from '../hooks/useClipboard'
 
 export const Patches: React.FC = () => {
   const [repos, setRepos] = useState<Repository[]>([])
   const [selectedRepo, setSelectedRepo] = useState<string>('')
   const [query, setQuery] = useState('add input validation to the login form')
+  const [useStreaming, setUseStreaming] = useState(false)
   const [patch, setPatch] = useState<string>('')
   const [validation, setValidation] = useState<any>(null)
+  const [segments, setSegments] = useState<any>(null)
   const [loading, setLoading] = useState(false)
+  const [streaming, setStreaming] = useState(false)
   const [applying, setApplying] = useState(false)
   const [error, setError] = useState<string>('')
+  const abortControllerRef = useRef<AbortController | null>(null)
+  const preRef = useRef<HTMLPreElement>(null)
+  const { copied, copy } = useClipboard()
 
   React.useEffect(() => {
     loadRepos()
   }, [])
 
+  React.useEffect(() => {
+    if (preRef.current && streaming) {
+      preRef.current.scrollTop = preRef.current.scrollHeight
+    }
+  }, [patch, streaming])
+
   const loadRepos = async () => {
     try {
       const data = await api.listRepositories()
       setRepos(data)
-      if (data.length > 0) {
+      if (data.length > 0 && !selectedRepo) {
         setSelectedRepo(data[0].id)
       }
     } catch (err: any) {
@@ -35,7 +48,52 @@ export const Patches: React.FC = () => {
     }
   }
 
-  const generatePatch = async () => {
+  const handleGeneratePatch = async () => {
+    if (!selectedRepo || !query) return
+
+    if (useStreaming) {
+      handleStreamPatch()
+    } else {
+      handleNonStreamPatch()
+    }
+  }
+
+  const handleStreamPatch = async () => {
+    if (!selectedRepo || !query) return
+
+    try {
+      setStreaming(true)
+      setError('')
+      setPatch('')
+      setValidation(null)
+      
+      const controller = new AbortController()
+      abortControllerRef.current = controller
+
+      await api.streamPatch(
+        selectedRepo,
+        {
+          query,
+          temperature: 0.2,
+          max_output_tokens: 2000,
+          force_unified_diff: true
+        },
+        (chunk: string) => {
+          setPatch(prev => prev + chunk)
+        },
+        controller.signal
+      )
+
+      setStreaming(false)
+    } catch (err: any) {
+      if (err.name !== 'AbortError') {
+        setError(err.message || 'Streaming failed')
+      }
+      setStreaming(false)
+    }
+  }
+
+  const handleNonStreamPatch = async () => {
     if (!selectedRepo || !query) return
 
     try {
@@ -51,6 +109,27 @@ export const Patches: React.FC = () => {
       setValidation(data.validation || null)
     } catch (err: any) {
       setError(err.message || 'Failed to generate patch')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const handleStopStreaming = () => {
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort()
+      setStreaming(false)
+    }
+  }
+
+  const handleSegmentPatch = async () => {
+    if (!patch) return
+
+    try {
+      setLoading(true)
+      const data = await api.segmentPatch(selectedRepo, patch)
+      setSegments(data)
+    } catch (err: any) {
+      setError(err.message || 'Failed to segment patch')
     } finally {
       setLoading(false)
     }
@@ -112,24 +191,79 @@ export const Patches: React.FC = () => {
             />
           </div>
 
-          <Button
-            icon={<GitPullRequest className="w-4 h-4" />}
-            onClick={generatePatch}
-            loading={loading}
-            disabled={!selectedRepo || !query}
-          >
-            Generate Patch
-          </Button>
+          <div className="flex items-center gap-2">
+            <input
+              type="checkbox"
+              id="use-streaming"
+              checked={useStreaming}
+              onChange={(e) => setUseStreaming(e.target.checked)}
+              className="w-4 h-4"
+            />
+            <label htmlFor="use-streaming" className="text-sm text-gray-700">
+              Use streaming mode (real-time generation)
+            </label>
+          </div>
+
+          <div className="flex items-center gap-3">
+            {streaming ? (
+              <Button
+                icon={<StopCircle className="w-4 h-4" />}
+                variant="danger"
+                onClick={handleStopStreaming}
+              >
+                Stop Streaming
+              </Button>
+            ) : (
+              <Button
+                icon={<GitPullRequest className="w-4 h-4" />}
+                onClick={handleGeneratePatch}
+                loading={loading}
+                disabled={!selectedRepo || !query}
+              >
+                Generate Patch
+              </Button>
+            )}
+            
+            {patch && !streaming && (
+              <>
+                <Button
+                  icon={<Layers className="w-4 h-4" />}
+                  variant="secondary"
+                  onClick={handleSegmentPatch}
+                  loading={loading}
+                >
+                  Segment Patch
+                </Button>
+                <Button
+                  icon={copied ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
+                  variant="ghost"
+                  onClick={() => copy(patch)}
+                  size="sm"
+                >
+                  {copied ? 'Copied!' : 'Copy'}
+                </Button>
+              </>
+            )}
+          </div>
         </div>
       </Card>
 
-      {error && <ErrorMessage message={error} onRetry={generatePatch} />}
+      {error && <ErrorMessage message={error} onRetry={handleGeneratePatch} />}
 
-      {loading ? (
-        <LoadingSpinner text="Generating patch..." />
-      ) : patch ? (
+      {(loading && !streaming) && <LoadingSpinner text="Generating patch..." />}
+
+      {streaming && (
+        <Card>
+          <div className="flex items-center justify-between mb-4">
+            <Badge variant="info">Streaming in progress...</Badge>
+            <Badge>{patch.length} characters</Badge>
+          </div>
+        </Card>
+      )}
+
+      {patch && (
         <>
-          {validation && (
+          {validation && !streaming && (
             <Card title="Validation">
               <div className="space-y-3">
                 <div className="flex items-center gap-2">
@@ -182,10 +316,38 @@ export const Patches: React.FC = () => {
           )}
 
           <Card title="Generated Patch">
-            <CodeBlock code={patch} language="diff" maxHeight="600px" />
+            <div className="relative">
+              <pre
+                ref={preRef}
+                className="bg-gray-900 text-green-400 p-4 rounded-lg overflow-auto text-sm font-mono max-h-[600px]"
+                aria-live="polite"
+              >
+                {patch}
+                {streaming && <span className="animate-pulse">▊</span>}
+              </pre>
+            </div>
           </Card>
+
+          {segments && (
+            <Card title="Suggested Commit Plan">
+              <div className="space-y-4">
+                {segments.commit_plan?.map((commit: any, idx: number) => (
+                  <div key={idx} className="p-4 bg-gray-50 rounded-lg">
+                    <h4 className="font-semibold text-gray-900 mb-2">
+                      Commit {idx + 1}: {commit.message}
+                    </h4>
+                    <div className="flex flex-wrap gap-2">
+                      {commit.files.map((file: string, fidx: number) => (
+                        <Badge key={fidx} variant="info">{file}</Badge>
+                      ))}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </Card>
+          )}
         </>
-      ) : null}
+      )}
     </div>
   )
 }

@@ -1,3 +1,4 @@
+// codecontext-rag/frontend/src/components/layout/Sidebar.tsx
 import type React from 'react'
 import { NavLink } from 'react-router-dom'
 import {
@@ -13,24 +14,48 @@ import {
   Sparkles,
   LineChart,
   Beaker,
-  Activity
+  Activity,
+  PlayCircle,
+  Brain,
+  Target,
+  CheckCircle
 } from 'lucide-react'
 import clsx from 'clsx'
 
 const navItems = [
   { path: '/', icon: Activity, label: 'Dashboard' },
   { path: '/repositories', icon: Database, label: 'Repositories' },
+  { 
+    separator: true,
+    label: 'Analysis & Search'
+  },
   { path: '/search', icon: Search, label: 'Code Search' },
   { path: '/recommendations', icon: TrendingUp, label: 'Recommendations' },
   { path: '/dependencies', icon: Network, label: 'Dependencies' },
   { path: '/graphs', icon: Map, label: 'Graphs' },
   { path: '/context', icon: FileCode, label: 'Context' },
+  { path: '/impact', icon: Activity, label: 'Impact Analysis' },
+  {
+    separator: true,
+    label: 'Code Generation'
+  },
   { path: '/prompts', icon: MessageSquare, label: 'Prompts' },
   { path: '/patches', icon: GitPullRequest, label: 'Patches' },
+  { path: '/tests', icon: Beaker, label: 'Tests' },
+  {
+    separator: true,
+    label: 'Product & AI'
+  },
   { path: '/features', icon: Sparkles, label: 'Features' },
   { path: '/product-analysis', icon: LineChart, label: 'Product Analysis' },
-  { path: '/impact', icon: Activity, label: 'Impact Analysis' },
-  { path: '/tests', icon: Beaker, label: 'Tests' },
+  {
+    separator: true,
+    label: 'Automation'
+  },
+  { path: '/task-analysis', icon: Brain, label: 'Task Analysis' },
+  { path: '/orchestration', icon: PlayCircle, label: 'Orchestration' },
+  { path: '/runner-validation', icon: CheckCircle, label: 'Runner Validation' },
+  { path: '/agent-feedback', icon: Target, label: 'AI Learning' },
 ]
 
 export const Sidebar: React.FC = () => {
@@ -50,23 +75,36 @@ export const Sidebar: React.FC = () => {
       
       <nav className="flex-1 overflow-y-auto p-4">
         <div className="space-y-1">
-          {navItems.map((item) => (
-            <NavLink
-              key={item.path}
-              to={item.path}
-              className={({ isActive }) =>
-                clsx(
-                  'flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium transition-colors',
-                  isActive
-                    ? 'bg-primary-50 text-primary-700'
-                    : 'text-gray-700 hover:bg-gray-100'
-                )
-              }
-            >
-              <item.icon className="w-5 h-5" />
-              {item.label}
-            </NavLink>
-          ))}
+          {navItems.map((item, idx) => {
+            if ('separator' in item && item.separator) {
+              return (
+                <div key={idx} className="pt-4 pb-2">
+                  <p className="px-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">
+                    {item.label}
+                  </p>
+                </div>
+              )
+            }
+            
+            const navItem = item as { path: string; icon: any; label: string }
+            return (
+              <NavLink
+                key={navItem.path}
+                to={navItem.path}
+                className={({ isActive }) =>
+                  clsx(
+                    'flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium transition-colors',
+                    isActive
+                      ? 'bg-primary-50 text-primary-700'
+                      : 'text-gray-700 hover:bg-gray-100'
+                  )
+                }
+              >
+                <navItem.icon className="w-5 h-5" />
+                {navItem.label}
+              </NavLink>
+            )
+          })}
         </div>
       </nav>
       
