@@ -1,7 +1,7 @@
-# src/codecontext/core/graph.py
+import os
+import re
 import networkx as nx
 from typing import Dict, List, Set, Optional
-import re
 
 class DependencyGraph:
     def __init__(self):
@@ -94,41 +94,94 @@ class DependencyGraph:
             return []
     
     def _resolve_import(self, import_stmt: str, source_file: str, language: str) -> Optional[str]:
-        """Resolve import statement to actual file path"""
+        """
+        Resolve import statement to actual file path (relative to repo root).
+        Improved Python resolution: handles relative imports, packages (__init__.py), and absolute modules.
+        JS/TS: better inference of extensions.
+        """
+        if not self.repo_root:
+            return None
+
+        # Helper to check candidate path existence under repo_root and return rel path
+        def _exists_rel(rel_path: str) -> Optional[str]:
+            abs_path = os.path.join(self.repo_root, rel_path)
+            if os.path.isfile(abs_path):
+                # normalize to posix-style relative
+                return rel_path.replace("\\", "/")
+            return None
+
+        # Python resolution
         if language == 'python':
-            # Extract module name from import statement
-            # Handle: import foo, from foo import bar, from foo.bar import baz
-            match = re.search(r'from\s+([\w.]+)\s+import|import\s+([\w.]+)', import_stmt)
-            if not match:
+            # Extract module from import statement
+            # Handle: "from foo.bar import baz", "import foo", "from . import x", "from ..pkg import y"
+            m = re.search(r'from\s+([.\w]+)\s+import|import\s+([.\w]+)', import_stmt)
+            if not m:
                 return None
-            
-            module = match.group(1) or match.group(2)
-            # Convert module path to file path
-            # This is simplified - real implementation needs to handle __init__.py, etc.
-            file_path = module.replace('.', '/') + '.py'
-            
-            # Check if it's a relative import
+            module = m.group(1) or m.group(2) or ""
+            module = module.strip()
+
+            # Build candidate paths for absolute module
+            def _absolute_candidates(mod: str) -> List[str]:
+                rel = mod.replace('.', '/')
+                return [
+                    f"{rel}.py",
+                    f"{rel}/__init__.py",
+                ]
+
+            # Build candidate paths for relative module (leading dots)
+            def _relative_candidates(mod: str, src: str) -> List[str]:
+                # src is like "pkg/sub/file.py"
+                src_dir = os.path.dirname(src)
+                # Count leading dots
+                leading = len(mod) - len(mod.lstrip('.'))
+                tail = mod.lstrip('.')
+                # Ascend parents: one dot = current package; two dots = parent, etc.
+                base = src_dir
+                for _ in range(max(0, leading - 1)):
+                    base = os.path.dirname(base)
+                rel = tail.replace('.', '/') if tail else ""
+                if rel:
+                    path = os.path.normpath(os.path.join(base, rel)).replace("\\", "/")
+                    return [f"{path}.py", f"{path}/__init__.py"]
+                else:
+                    # from . import x  -> current package __init__.py or package root
+                    return [f"{base}/__init__.py"]
+
+            candidates: List[str] = []
             if module.startswith('.'):
-                # Resolve relative to source file
-                source_dir = '/'.join(source_file.split('/')[:-1])
-                file_path = f"{source_dir}/{file_path}"
-            
-            return file_path
-        
+                candidates = _relative_candidates(module, source_file)
+            else:
+                candidates = _absolute_candidates(module)
+
+            # Return first existing candidate
+            for cand in candidates:
+                rel = _exists_rel(cand)
+                if rel:
+                    return rel
+
+            return None
+
         elif language == 'javascript':
-            # Handle: import foo from './foo'
-            match = re.search(r"from\s+['\"]([^'\"]+)['\"]", import_stmt)
-            if not match:
+            # Handle: import foo from './foo' or '../bar'
+            m = re.search(r"from\s+['\"]([^'\"]+)['\"]", import_stmt)
+            if not m:
                 return None
-            
-            path = match.group(1)
+            path = m.group(1)
+            src_dir = os.path.dirname(source_file)
             if path.startswith('.'):
                 # Relative import
-                source_dir = '/'.join(source_file.split('/')[:-1])
-                file_path = f"{source_dir}/{path}"
-                # Add extension if missing
-                if not file_path.endswith(('.js', '.jsx', '.ts', '.tsx')):
-                    file_path += '.js'
-                return file_path
+                base = os.path.normpath(os.path.join(src_dir, path)).replace("\\", "/")
+                # Try common extensions
+                for ext in (".ts", ".tsx", ".js", ".jsx"):
+                    rel = _exists_rel(base + ext)
+                    if rel:
+                        return rel
+                # Try index files
+                for ext in (".ts", ".tsx", ".js", ".jsx"):
+                    rel = _exists_rel(os.path.join(base, "index" + ext))
+                    if rel:
+                        return rel
+            # Non-relative imports are typically resolved via bundler/node_modules.
+            return None
         
         return None

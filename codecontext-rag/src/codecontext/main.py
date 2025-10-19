@@ -1,15 +1,15 @@
-# src/codecontext/main.py
+
 from fastapi import FastAPI, Request
+from fastapi.exceptions import HTTPException
+
 from starlette.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
 import uuid
 import time
 from .config import settings
-from .utils.logging import configure_logging, get_logger
 from .utils.responses import error_response
 
-# Import all route modules
 from .api.routes import (
     health,
     repositories,
@@ -26,7 +26,6 @@ from .api.routes import (
     segment,
     features,
     diagnostics,
-    # NEW ROUTES
     test_discovery,
     entity_metadata,
     symbols,
@@ -35,7 +34,8 @@ from .api.routes import (
     runner_integration,
     task_analyzer_routes,
     strategy_selector_routes,
-    orchestrator_routes
+    orchestrator_routes,
+    metrics
 )
 
 from .storage.inmemory import InMemoryRepositoryStore, InMemoryJobStore
@@ -46,6 +46,8 @@ from .storage.vector_store import VectorStore
 from .indexing.indexer import Indexer
 from .storage.feature_store import FeatureStore
 from .integrations.llm_gateway import LLMGatewayClient
+from .utils.logging import configure_logging, get_logger
+from .storage.cache import TTLCache
 
 logger = get_logger(__name__)
 
@@ -81,14 +83,14 @@ if settings.use_llm_gateway_embeddings:
     embedder = LLMGatewayEmbedder(
         gateway_url=settings.llm_gateway_url,
         model=settings.embedding_model,
-        dimensions=1536
+        dimensions=settings.embedding_dimensions
     )
 else:
     logger.info("Using local embeddings (fallback)")
     embedder = LLMGatewayEmbedder(
         gateway_url=settings.llm_gateway_url,
         model=settings.embedding_model,
-        dimensions=1536
+        dimensions=settings.embedding_dimensions
     )
 
 ranker = RankingEngine()
@@ -96,6 +98,9 @@ repo_store = InMemoryRepositoryStore()
 job_store = InMemoryJobStore(repo_store)
 indexer = Indexer(vector_store, parser, embedder, meta_path=settings.index_meta_path)
 indexer.repo_store = repo_store
+
+# Add global TTL cache for retrieval results
+cache = TTLCache()
 
 # Store in app state
 app.state.vector_store = vector_store
@@ -108,6 +113,11 @@ app.state.job_store = job_store
 app.state.uptime_seconds = uptime_seconds
 app.state.feature_store = FeatureStore()
 app.state.llm_client = LLMGatewayClient()
+app.state.cache = cache  # NEW
+
+# make cache available to indexer for invalidation (phase 7)
+indexer.cache = cache
+
 
 # Middleware
 app.add_middleware(RequestIdMiddleware)
@@ -153,9 +163,27 @@ app.include_router(repo_structure.router)
 # Register agent/workflow routes
 app.include_router(agent_feedback.router)
 app.include_router(runner_integration.router)
-app.include_router(task_analyzer_routes.router)  # ← Grouped with workflow routes
+app.include_router(task_analyzer_routes.router)
 app.include_router(strategy_selector_routes.router)
 app.include_router(orchestrator_routes.router)
+
+# Register metrics route
+app.include_router(metrics.router)
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    # Wrap FastAPI HTTPExceptions into your standard error envelope
+    detail = exc.detail if isinstance(exc.detail, str) else (exc.detail.get("message") if isinstance(exc.detail, dict) else str(exc.detail))
+    body = error_response(request, code=str(exc.status_code), message=detail or "HTTP error")
+    return JSONResponse(status_code=exc.status_code, content=body)
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    # Last-resort error wrapper for unexpected exceptions
+    body = error_response(request, code="INTERNAL_ERROR", message=str(exc)[:300])
+    return JSONResponse(status_code=500, content=body)
+
+
 
 @app.exception_handler(404)
 async def not_found_handler(request: Request, exc):
@@ -187,7 +215,8 @@ async def root(request: Request):
             "Agent feedback learning",
             "Patch generation and application",
             "Multi-agent workflows",
-            "Task analysis and orchestration"  # ← Added
+            "Task analysis and orchestration",
+            "Metrics"
         ]
     }
 
@@ -196,8 +225,9 @@ async def startup_event():
     logger.info("CodeContext RAG API starting up...")
     logger.info(f"LLM Gateway URL: {settings.llm_gateway_url}")
     logger.info(f"Vector store path: {settings.lancedb_path}")
+    logger.info(f"Embedding model: {settings.embedding_model}, dims: {settings.embedding_dimensions}")
     logger.info("Agent-focused APIs enabled")
-    logger.info("Task orchestration enabled")  # ← Added
+    logger.info("Task orchestration enabled")
     
     try:
         loaded = indexer.load_all_metadata()

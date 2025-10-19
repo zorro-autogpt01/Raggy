@@ -1,3 +1,5 @@
+
+
 import os
 from dataclasses import dataclass
 from typing import Optional
@@ -48,12 +50,13 @@ class Settings:
     llm_gateway_enabled: bool = _bool(os.getenv("LLM_GATEWAY_ENABLED"), True)
     llm_gateway_model: str = os.getenv("LLM_GATEWAY_MODEL", "gpt-4o-mini")
     
-    # Embeddings - Use LLM Gateway by default
+    # Embeddings
     use_llm_gateway_embeddings: bool = _bool(os.getenv("USE_LLM_GATEWAY_EMBEDDINGS"), True)
     embedding_model: str = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
-    embedding_dimensions: Optional[int] = int(os.getenv("EMBEDDING_DIMENSIONS")) if os.getenv("EMBEDDING_DIMENSIONS") else None
+    embedding_dimensions_env: Optional[str] = os.getenv("EMBEDDING_DIMENSIONS") or os.getenv("EMBEDDING_DIMENSION")
+    embedding_dimensions: Optional[int] = int(embedding_dimensions_env) if embedding_dimensions_env else None
     
-    # Legacy local embeddings (fallback)
+    # Legacy local embeddings
     local_embedding_model: str = os.getenv("LOCAL_EMBEDDING_MODEL", "microsoft/codebert-base")
     openai_api_key: str | None = os.getenv("OPENAI_API_KEY")
 
@@ -69,7 +72,7 @@ class Settings:
     # Pre-commit hooks for apply-patch
     pre_commit_hooks: list[str] = None
 
-    # Local reranker (cross-encoder)
+    # Local reranker
     reranker_enabled: bool = _bool(os.getenv("RERANKER_ENABLED"), True)
     reranker_model: str = os.getenv("RERANKER_MODEL", "cross-encoder/ms-marco-MiniLM-L-6-v2")
     reranker_topk: int = int(os.getenv("RERANKER_TOPK", "50"))
@@ -77,6 +80,11 @@ class Settings:
     # Agentic retrieval
     agentic_default: bool = _bool(os.getenv("AGENTIC_DEFAULT"), False)
     agentic_max_iters: int = int(os.getenv("AGENTIC_MAX_ITERS", "2"))
+    agentic_min_semantic: float = float(os.getenv("AGENTIC_MIN_SEMANTIC", "0.55"))
+    agentic_verify_files: bool = _bool(os.getenv("AGENTIC_VERIFY_FILES"), True)
+    agentic_verify_symbols: bool = _bool(os.getenv("AGENTIC_VERIFY_SYMBOLS"), True)
+    agentic_min_new_files: int = int(os.getenv("AGENTIC_MIN_NEW_FILES", "1"))
+    agentic_gain_min_ratio: float = float(os.getenv("AGENTIC_GAIN_MIN_RATIO", "0.15"))
 
     # Tests
     test_cmd: str = os.getenv("TEST_CMD", "pytest -q")
@@ -88,6 +96,23 @@ class Settings:
     runner_url: str = os.getenv("RUNNER_URL", "http://192.168.0.7:8001")
     runner_api_key: str = os.getenv("RUNNER_API_KEY", "dev-runner-key-123")
     runner_enabled: bool = _bool(os.getenv("RUNNER_ENABLED"), True)
+
+    # Lexical/BM25
+    bm25_enabled: bool = _bool(os.getenv("BM25_ENABLED"), True)
+    lexical_index_path: str = os.getenv("LEXICAL_INDEX_PATH", "./data/lexical")
+
+    # Metrics
+    metrics_enabled: bool = _bool(os.getenv("METRICS_ENABLED"), True)
+
+    # Phase 4: Python static callgraph
+    python_callgraph_enabled: bool = _bool(os.getenv("PYTHON_CALLGRAPH_ENABLED"), True)
+
+    # Phase 7: caching
+    retrieval_cache_enabled: bool = _bool(os.getenv("RETRIEVAL_CACHE_ENABLED"), True)
+    retrieval_cache_ttl_sec: int = int(os.getenv("RETRIEVAL_CACHE_TTL_SEC", "180"))
+    embed_cache_enabled: bool = _bool(os.getenv("EMBED_CACHE_ENABLED"), True)
+    embed_cache_ttl_sec: int = int(os.getenv("EMBED_CACHE_TTL_SEC", "600"))
+    embed_cache_max_items: int = int(os.getenv("EMBED_CACHE_MAX_ITEMS", "512"))
 
     def __post_init__(self):
         self.pre_commit_hooks = _split_list(os.getenv("PRE_COMMIT_HOOKS", ""))

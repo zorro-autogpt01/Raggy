@@ -1,5 +1,5 @@
-from fastapi import APIRouter, Depends, Request, Response, HTTPException
-from typing import List, Dict
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from typing import List, Dict, Any
 import uuid
 import inspect
 from ...utils.responses import success_response
@@ -58,9 +58,7 @@ async def get_recommendations(request: Request, body: RecommendationRequest, res
         # Temporarily override ranker weights
         base_w = ranker.weights.copy()
         try:
-            # Merge learned weights (already normalized)
             ranker.weights = learned
-            pass
         except Exception:
             ranker.weights = base_w
 
@@ -107,7 +105,6 @@ async def interactive_recommendations(
     body: RecommendationRequest,
     response: Response
 ):
-    # unchanged from your dump
     session_id = str(uuid.uuid4())
     conv_id = f"rec_{session_id}"
 
@@ -343,23 +340,3 @@ def submit_feedback(request: Request, session_id: str, body: FeedbackRequest):
     except Exception as e:
         print(f"LTR feedback failed: {e}")
     return success_response(request, {"recorded": True, "message": "Thanks! Preferences updated."})
-
-
-
-def cosine_similarity(vec1: List[float], vec2: List[float]) -> float:
-    """Calculate cosine similarity between two vectors"""
-    import math
-    dot_product = sum(a * b for a, b in zip(vec1, vec2))
-    magnitude1 = math.sqrt(sum(a * a for a in vec1))
-    magnitude2 = math.sqrt(sum(b * b for b in vec2))
-    if magnitude1 == 0 or magnitude2 == 0:
-        return 0.0
-    return dot_product / (magnitude1 * magnitude2)
-
-
-@router.post("/recommendations/{session_id}/feedback")
-def submit_feedback(request: Request, session_id: str, body: FeedbackRequest):
-    data = {"recorded": True, "message": "Thank you for your feedback! This helps improve recommendations."}
-    return success_response(request, data)
-
-

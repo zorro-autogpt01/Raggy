@@ -1,4 +1,3 @@
-# src/codecontext/core/embedder.py
 from typing import List, Dict, Protocol
 import httpx
 import os
@@ -11,7 +10,6 @@ from ..config import settings
 class Embedder:
     def __init__(self, model_name: str = "microsoft/codebert-base"):
         """Initialize embedder with specified model"""
-        # For CodeBERT
         self.model = SentenceTransformer(model_name)
         self.dimension = self.model.get_sentence_embedding_dimension()
     
@@ -27,7 +25,6 @@ class Embedder:
     
     def embed_code_entity(self, entity: Dict) -> Dict:
         """Generate embedding for a code entity (function/class)"""
-        # Combine name, docstring, and code for better representation
         text_parts = []
         
         if 'name' in entity:
@@ -37,8 +34,7 @@ class Embedder:
             text_parts.append(entity['docstring'])
         
         if 'code' in entity:
-            # Include actual code (truncated if too long)
-            code = entity['code'][:1000]  # Limit to 1000 chars
+            code = entity['code'][:1000]
             text_parts.append(code)
         
         combined_text = "\n".join(text_parts)
@@ -47,9 +43,8 @@ class Embedder:
         return {
             **entity,
             'embedding': embedding,
-            'embedding_text': combined_text[:200]  # Store sample for debugging
+            'embedding_text': combined_text[:200]
         }
-
 
 class LLMGatewayEmbedder:
     """
@@ -63,16 +58,6 @@ class LLMGatewayEmbedder:
         model_key: str = None,
         dimensions: int = None
     ):
-        """
-        Initialize LLM Gateway embedder
-        
-        Args:
-            gateway_url: Base URL of LLM Gateway (e.g., http://llm-gateway:3010)
-            model: Model name (default: text-embedding-3-small)
-            model_id: Optional model ID from gateway config
-            model_key: Optional model key from gateway config
-            dimensions: Optional dimensions for supported models
-        """
         self.gateway_url = gateway_url or os.getenv(
             "LLM_GATEWAY_URL", 
             "http://llm-gateway:3010"
@@ -82,11 +67,14 @@ class LLMGatewayEmbedder:
         self.model_key = model_key
         self.dimensions = dimensions
         
-        # Create persistent HTTP client for connection pooling
         self.client = httpx.AsyncClient(
             timeout=60.0,
             limits=httpx.Limits(max_keepalive_connections=5, max_connections=10)
         )
+        # Simple in-memory memo cache for single texts
+        self._memo: Dict[str, tuple[float, List[float]]] = {}
+        self._memo_order: List[str] = []
+
     
     async def embed_texts(self, texts: List[str], max_retries: int = 3) -> List[List[float]]:
         """
@@ -95,14 +83,13 @@ class LLMGatewayEmbedder:
         if not texts:
             return []
         
-        # Truncate very long texts to avoid token limits
-        MAX_CHARS = 8000  # OpenAI limit is ~8000 tokens, roughly 32k chars
+        MAX_CHARS = 8000
         truncated_texts = []
         for text in texts:
-            if len(text) > MAX_CHARS:
-                truncated_texts.append(text[:MAX_CHARS] + "... [truncated]")
+            if len(text or "") > MAX_CHARS:
+                truncated_texts.append((text or "")[:MAX_CHARS] + "... [truncated]")
             else:
-                truncated_texts.append(text)
+                truncated_texts.append(text or "")
         
         body = {
             "input": truncated_texts,
@@ -116,78 +103,89 @@ class LLMGatewayEmbedder:
         if self.dimensions:
             body["dimensions"] = self.dimensions
         
-        # Retry logic
         last_error = None
         for attempt in range(max_retries):
             try:
                 response = await self.client.post(
                     f"{self.gateway_url}/api/embeddings",
                     json=body,
-                    timeout=120.0  # Longer timeout
+                    timeout=120.0
                 )
                 response.raise_for_status()
                 
                 result = response.json()
                 embeddings = [item["embedding"] for item in result["data"]]
+
+                # Validate embedding dimensions if provided
+                if self.dimensions is not None and embeddings:
+                    got = len(embeddings[0])
+                    if got != self.dimensions:
+                        raise RuntimeError(
+                            f"Embedding dimension mismatch: expected {self.dimensions}, got {got}. "
+                            "Check LLM gateway model configuration or EMBEDDING_DIMENSION(S) setting."
+                        )
                 
                 return embeddings
                 
             except httpx.HTTPStatusError as e:
                 last_error = e
-                if e.response.status_code == 500:
-                    # Log the error details
-                    print(f"Embedding attempt {attempt + 1}/{max_retries} failed with 500")
-                    print(f"Response: {e.response.text[:500]}")
-                    
-                    # If this is a text length issue, try splitting
-                    if attempt < max_retries - 1 and len(truncated_texts) > 1:
-                        print(f"Retrying with smaller batch...")
-                        # Split batch in half and retry
-                        mid = len(truncated_texts) // 2
-                        try:
-                            first_half = await self.embed_texts(truncated_texts[:mid], max_retries=1)
-                            second_half = await self.embed_texts(truncated_texts[mid:], max_retries=1)
-                            return first_half + second_half
-                        except Exception as split_error:
-                            print(f"Split retry failed: {split_error}")
-                    
-                    # Wait before retry
+                if e.response.status_code == 500 and attempt < max_retries - 1:
                     import asyncio
                     await asyncio.sleep(1 * (attempt + 1))
                 else:
-                    # Other HTTP errors, don't retry
                     raise
-                    
             except httpx.TimeoutException as e:
                 last_error = e
-                print(f"Embedding attempt {attempt + 1}/{max_retries} timed out")
                 if attempt < max_retries - 1:
                     import asyncio
                     await asyncio.sleep(2 * (attempt + 1))
-                    
+                else:
+                    raise
             except Exception as e:
                 last_error = e
-                print(f"Embedding attempt {attempt + 1}/{max_retries} failed: {e}")
                 break
         
-        # All retries failed
         raise RuntimeError(f"Failed to generate embeddings after {max_retries} attempts: {last_error}")
     
     async def embed_text(self, text: str) -> List[float]:
         """
-        Generate embedding for a single text
-        
-        Args:
-            text: Text string to embed
-            
-        Returns:
-            Embedding vector as List[float]
+        Cache single-text embeddings with TTL to reduce gateway calls.
         """
+        key = f"{self.model}:{text}"
+        now = time.time()
+        if settings.embed_cache_enabled:
+            ent = self._memo.get(key)
+            if ent:
+                exp, vec = ent
+                if exp > 0 and exp > now:
+                    return list(vec)
+                else:
+                    # expired
+                    self._memo.pop(key, None)
+                    try:
+                        self._memo_order.remove(key)
+                    except Exception:
+                        pass
+
         embeddings = await self.embed_texts([text])
-        return embeddings[0] if embeddings else []
+        vec = embeddings[0] if embeddings else []
+        if settings.embed_cache_enabled and vec:
+            exp = now + float(settings.embed_cache_ttl_sec) if settings.embed_cache_ttl_sec > 0 else 0.0
+            self._memo[key] = (exp, list(vec))
+            self._memo_order.append(key)
+            # trim cache size
+            max_items = max(10, int(settings.embed_cache_max_items or 256))
+            if len(self._memo_order) > max_items:
+                to_evict = len(self._memo_order) - max_items
+                for _ in range(to_evict):
+                    try:
+                        oldest = self._memo_order.pop(0)
+                        self._memo.pop(oldest, None)
+                    except Exception:
+                        break
+        return vec 
     
     async def close(self):
-        """Close the HTTP client"""
         await self.client.aclose()
     
     async def __aenter__(self):
@@ -200,7 +198,6 @@ class LLMGatewayEmbedder:
         """Embed a code entity with better error handling"""
         import asyncio
         
-        # Build text representation
         text_parts = []
         
         if entity.get('entity_type'):
@@ -213,8 +210,7 @@ class LLMGatewayEmbedder:
             text_parts.append(f"File: {entity['file_path']}")
         
         if entity.get('code'):
-            # Limit code length aggressively
-            code = entity['code'][:3000]  # Max 3000 chars of code
+            code = entity['code'][:3000]
             text_parts.append(f"Code:\n{code}")
         
         if entity.get('language'):
@@ -222,14 +218,12 @@ class LLMGatewayEmbedder:
         
         text = "\n".join(text_parts)
         
-        # Sanitize text - remove null bytes and control characters
         import re
         text = re.sub(r'[\x00-\x08\x0b-\x0c\x0e-\x1f\x7f-\x9f]', '', text)
         
         if not text.strip():
             text = f"Empty {entity.get('entity_type', 'entity')}"
-        
-        # Limit total text length
+
         MAX_TEXT_LENGTH = 5000
         if len(text) > MAX_TEXT_LENGTH:
             text = text[:MAX_TEXT_LENGTH] + "... [truncated]"
@@ -240,29 +234,17 @@ class LLMGatewayEmbedder:
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
         
-        try:
-            embedding = loop.run_until_complete(self.embed_text(text))
-        except Exception as e:
-            print(f"Warning: Failed to embed {entity.get('id')}: {e}")
-            # Return entity without embedding - will be filtered out later
-            return entity
-        
-        # Validate embedding
-        if not embedding:
-            print(f"Warning: Empty embedding for {entity.get('id')}")
-            return entity
-        
-        if len(embedding) != self.dimensions:
-            print(f"Warning: Expected {self.dimensions} dims, got {len(embedding)} for {entity.get('id')}")
-            # Pad or truncate
-            if len(embedding) < self.dimensions:
-                embedding.extend([0.0] * (self.dimensions - len(embedding)))
-            else:
-                embedding = embedding[:self.dimensions]
+        embedding = loop.run_until_complete(self.embed_text(text))
+
+        # Validate embedding dimension strictly
+        if self.dimensions is not None and embedding and len(embedding) != self.dimensions:
+            raise RuntimeError(
+                f"Embedding dimension mismatch: expected {self.dimensions}, got {len(embedding)}. "
+                "Fix configuration to avoid corrupting the vector store."
+            )
         
         entity['embedding'] = embedding
         return entity
-
 
 class OpenAIEmbedder:
     """
@@ -274,7 +256,6 @@ class OpenAIEmbedder:
         self.client = openai.AsyncOpenAI()
     
     async def embed_texts(self, texts: List[str]) -> List[List[float]]:
-        """Generate embeddings using OpenAI directly"""
         if not texts:
             return []
         
@@ -286,6 +267,5 @@ class OpenAIEmbedder:
         return [item.embedding for item in response.data]
     
     async def embed_text(self, text: str) -> List[float]:
-        """Generate embedding for single text"""
         embeddings = await self.embed_texts([text])
         return embeddings[0] if embeddings else []

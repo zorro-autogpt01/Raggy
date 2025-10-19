@@ -18,7 +18,9 @@ from ...integrations.llm_gateway import LLMGatewayClient
 from ...integrations.github_hub import GitHubHubClient
 from ...core.prompt import PromptAssembler
 from ...core.patch import validate_patch
-from .prompts import _vector_top_chunks, _dependency_neighbor_chunks
+
+# UPDATED: use unified retrieval from core.retrieval
+from ...core.retrieval import retrieve_chunks, dependency_neighbor_chunks
 
 from ...config import settings
 
@@ -67,8 +69,13 @@ async def _build_messages_if_needed(
     slice_target = options.slice_target
     slice_direction = options.slice_direction or "forward"
     slice_depth = options.slice_depth or 2
+    hybrid_alpha = getattr(options, "hybrid_alpha", 0.2)
+    # Agentic defaults (Phase 1 centralized retrieval; Phase 2 keeps same)
+    agentic = getattr(options, "agentic", settings.agentic_default)
+    max_agentic_iters = getattr(options, "max_agentic_iters", settings.agentic_max_iters)
 
-    base_chunks, artifacts, _ = await _vector_top_chunks(
+    # Unified retrieval for base chunks
+    base_chunks, artifacts, _ = await retrieve_chunks(
         request=request,
         repo_id=repo_id,
         query=body.query,
@@ -78,7 +85,10 @@ async def _build_messages_if_needed(
         call_graph_depth=call_graph_depth,
         slice_target=slice_target,
         slice_direction=slice_direction,
-        slice_depth=slice_depth
+        slice_depth=slice_depth,
+        hybrid_alpha=hybrid_alpha,
+        agentic=agentic,
+        max_agentic_iters=max_agentic_iters
     )
 
     neighbor_chunks: List[Dict[str, Any]] = []
@@ -90,7 +100,8 @@ async def _build_messages_if_needed(
             q_emb = embedder.embed_text(body.query)
 
         base_files = list({b.get("file_path") for b in base_chunks if b.get("file_path")})
-        neighbor_chunks = await _dependency_neighbor_chunks(
+        # Unified dependency neighbor expansion
+        neighbor_chunks = await dependency_neighbor_chunks(
             request=request,
             repo_id=repo_id,
             query_embedding=q_emb,
@@ -156,6 +167,7 @@ async def generate_patch(
     session_id = str(uuid.uuid4())
     request.state.request_id = session_id
 
+    # Use per-call client and ensure it's closed properly
     llm_client = LLMGatewayClient()
     try:
         messages = await _build_messages_if_needed(request, repo_id, body)
@@ -181,6 +193,10 @@ async def generate_patch(
                 metadata={"repo_id": repo_id, "session_id": session_id, "purpose": "generate_patch"},
                 dry_run=dry_run
             )
+            # Error-hardened: result always has content + error
+            err = result.get("error")
+            if err:
+                raise HTTPException(status_code=502, detail=f"LLM error: {err}")
             content = result.get("content", "")
 
             repo_store = request.app.state.repo_store
@@ -211,17 +227,25 @@ async def generate_patch(
 
         else:
             async def streamer() -> AsyncIterator[bytes]:
-                stream_iter = await llm_client.chat(
-                    messages=messages,
-                    model=model,
-                    temperature=temperature,
-                    max_tokens=max_out,
-                    stream=True,
-                    metadata={"repo_id": repo_id, "session_id": session_id, "purpose": "generate_patch"},
-                    dry_run=dry_run
-                )
-                async for chunk in stream_iter:
-                    yield chunk.encode("utf-8")
+                # Create dedicated client in streamer context to avoid premature close
+                client = LLMGatewayClient()
+                try:
+                    stream_iter = await client.chat(
+                        messages=messages,
+                        model=model,
+                        temperature=temperature,
+                        max_tokens=max_out,
+                        stream=True,
+                        metadata={"repo_id": repo_id, "session_id": session_id, "purpose": "generate_patch"},
+                        dry_run=dry_run
+                    )
+                    async for chunk in stream_iter:
+                        yield chunk.encode("utf-8")
+                except Exception as e:
+                    # Terminate stream with error line
+                    yield f"\n\n[STREAM ERROR] {str(e)[:200]}".encode("utf-8")
+                finally:
+                    await client.close()
 
             return StreamingResponse(streamer(), media_type="text/plain")
 
@@ -231,6 +255,7 @@ async def generate_patch(
         raise HTTPException(status_code=500, detail=f"Patch generation failed: {str(e)}")
     finally:
         await llm_client.close()
+
 
 
 @router.post("/{repo_id}/apply-patch")
@@ -334,7 +359,6 @@ async def apply_patch(
         if not body.skip_hooks and settings.pre_commit_hooks:
             ok = _run_pre_commit_hooks(settings.pre_commit_hooks, cwd=worktree_dir, logs=logs)
             if not ok:
-                # Allow user to override by skip_hooks true
                 raise HTTPException(status_code=400, detail={"message": "Pre-commit hooks failed", "logs": logs})
 
         code, out, err = _run(["git", "add", "-A"], cwd=worktree_dir)

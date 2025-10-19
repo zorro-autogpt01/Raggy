@@ -14,6 +14,7 @@ from ..config import settings
 from ..diagramming.pyreverse_runner import run_pyreverse
 from ..diagramming.depcruise_runner import run_depcruise
 from ..diagramming.doxygen_runner import run_doxygen
+from ..diagramming.callgraph_python import run_static_callgraph
 
 def _atomic_write(path: Path, data: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -155,6 +156,34 @@ class Indexer:
         except Exception as e:
             print(f"Warning: failed to save index metadata (incremental) for {repo_id}: {e}")
 
+        # Phase 2: for simplicity, full lexical rebuild on incremental (optional improvement)
+        try:
+            from ..core.lexical import build_index as build_lex
+            docs = []
+            # fetch chunks for changed files only
+            for f in changed_files:
+                ents = self.vector_store.get_by_file(repo_id, f)
+                for e in ents:
+                    if e.get("entity_type") == "chunk":
+                        text = f"{e.get('name','')} {e.get('file_path','')} {(e.get('code') or '')}"
+                        docs.append({"id": e.get("id") or e.get("chunk_id"), "text": text})
+            if docs:
+                # CM: build() replaces entire repo index; for fine-grained, a smarter incremental indexer could be done later
+                # Simpler approach: rebuild full index by scanning all chunks
+                all_docs = []
+                # Pull all chunk entities for repo
+                try:
+                    # LanceDB filter for repo chunks
+                    chunks = self.vector_store.query_where(f"repo_id = '{repo_id}' AND entity_type = 'chunk'")
+                    for e in chunks:
+                        text = f"{e.get('name','')} {e.get('file_path','')} {(e.get('code') or '')}"
+                        all_docs.append({"id": e.get("id") or e.get("chunk_id"), "text": text})
+                except Exception:
+                    all_docs = docs
+                build_lex(repo_id, all_docs, base_path=settings.lexical_index_path)
+        except Exception as e:
+            print(f"Lexical index (incremental) failed for {repo_id}: {e}")
+
         return {'status': 'completed', 'mode': 'incremental', 'files_updated': result['files_updated'], 'entities_updated': result['entities_updated']}
 
     def _sync_graphs_to_neo4j(self, repo_id: str):
@@ -232,6 +261,17 @@ class Indexer:
                     class_graph = dg
         except Exception as e:
             print(f"doxygen runner failed: {e}")
+
+        # Phase 4: Fallback static Python callgraph if enabled and call_graph still empty
+        if (not call_graph.get("nodes")) and settings.python_callgraph_enabled:
+            try:
+                py_cg = run_static_callgraph(repo_path)
+                if py_cg and py_cg.get("nodes"):
+                    call_graph = py_cg
+                    print(f"Static Python callgraph built with {len(call_graph.get('nodes', []))} nodes.")
+            except Exception as e:
+                print(f"Static Python callgraph failed: {e}")
+
 
         self.class_graphs[repo_id] = class_graph or {"nodes": [], "edges": []}
         self.module_graphs[repo_id] = module_graph or {"nodes": [], "edges": []}
@@ -375,6 +415,21 @@ class Indexer:
         print(f"Indexing {len(entities_to_index)} entities...")
         self.vector_store.upsert(entities_to_index)
 
+        # Build lexical BM25-like index over chunk entities (Phase 2)
+        if settings.bm25_enabled:
+            try:
+                from ..core.lexical import build_index as build_lex_index
+                docs = []
+                for e in entities_to_index:
+                    if e.get("entity_type") == "chunk":
+                        text = f"{e.get('name','')} {e.get('file_path','')} {(e.get('code') or '')}"
+                        docs.append({"id": e.get("id") or e.get("chunk_id"), "text": text})
+                if docs:
+                    build_lex_index(repo_id, docs, base_path=settings.lexical_index_path)
+                    print(f"Lexical index built for repo {repo_id} with {len(docs)} chunks.")
+            except Exception as e:
+                print(f"Lexical index build failed for {repo_id}: {e}")
+
         # Run feature extraction (safely) if enabled
         if settings.enable_feature_extraction:
             print("Running feature extraction...")
@@ -388,13 +443,11 @@ class Indexer:
                 llm_client = LLMGatewayClient()
                 extractor = FeatureExtractor(self.embedder, llm_client)
 
-                # Execute async extractor inside this sync method
                 try:
                     features = asyncio.run(
                         extractor.extract_features(repo_id, repo_path, parsed_data, self.vector_store)
                     )
                 except RuntimeError:
-                    # If we're already in an event loop (rare here), create a new one
                     loop = asyncio.new_event_loop()
                     try:
                         features = loop.run_until_complete(
@@ -404,7 +457,6 @@ class Indexer:
                         loop.close()
 
                 feature_store.save_features(features)
-                # Best-effort close LLM client
                 try:
                     asyncio.run(llm_client.close())
                 except Exception:
@@ -415,13 +467,11 @@ class Indexer:
             except Exception as e:
                 print(f"Feature extraction failed: {e}")
 
-        # Best-effort persist
         try:
             self.save_metadata(repo_id)
         except Exception as e:
             print(f"Warning: failed to save index metadata for {repo_id}: {e}")
 
-        # Optional: push graphs to Neo4j
         self._sync_graphs_to_neo4j(repo_id)
 
         result = {

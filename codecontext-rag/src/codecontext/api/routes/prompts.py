@@ -321,8 +321,21 @@ async def build_prompt(
         neighbor_chunks = await _dependency_neighbor_chunks(request, repo_id, q_emb, base_files, dep_depth, dep_dir, neighbor_files_limit, per_file_neighbor_chunks, languages)
 
     from ...core.prompt import PromptAssembler
-    assembler = PromptAssembler(LLMGatewayClient())
     header_blocks = [per_file_summaries[fp] for fp in sorted(per_file_summaries.keys())]
+    assembler = PromptAssembler(LLMGatewayClient())
+    try:
+        messages, usage = await assembler.assemble(
+            query=body.query,
+            base_chunks=base_chunks,
+            neighbor_chunks=neighbor_chunks,
+            model=model,
+            system_prompt=options.system_prompt,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            header_blocks=header_blocks
+        )
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Prompt assembly failed: {str(e)}")
 
     messages, usage = await assembler.assemble(
         query=body.query,

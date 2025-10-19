@@ -3,7 +3,6 @@ from typing import List, Dict, Optional
 import pyarrow as pa
 import pandas as pd
 
-
 class VectorStore:
     def __init__(self, path: str = "./data/lancedb"):
         """Initialize LanceDB connection"""
@@ -13,7 +12,6 @@ class VectorStore:
     def _init_tables(self):
         """Create tables if they don't exist"""
         if "code_entities" not in self.db.table_names():
-            # Schema supports chunk entities
             schema = pa.schema([
                 pa.field("id", pa.string()),
                 pa.field("repo_id", pa.string()),
@@ -34,7 +32,6 @@ class VectorStore:
         if not entities:
             return
 
-        # Validate consistent embedding length across batch
         first = next((e for e in entities if isinstance(e.get("embedding"), list)), None)
         if not first:
             print("No valid entities to upsert")
@@ -50,7 +47,6 @@ class VectorStore:
             if len(embedding) != first_dim:
                 print(f"Warning: Skipping entity {entity.get('id')} - wrong dimension: {len(embedding)} vs {first_dim}")
                 continue
-            # Ensure required minimal fields exist
             entity.setdefault('name', entity.get('name') or '')
             entity.setdefault('code', entity.get('code') or '')
             entity.setdefault('chunk_id', entity.get('chunk_id') or '')
@@ -65,7 +61,6 @@ class VectorStore:
         table_name = "code_entities"
         try:
             table = self.db.open_table(table_name)
-            # Align columns to the existing table schema if necessary
             try:
                 table_cols = set(table.schema.names)
                 df_cols = list(col for col in df.columns if col in table_cols)
@@ -75,7 +70,6 @@ class VectorStore:
                 print(f"VectorStore.upsert add failed, attempting create: {e}")
                 self.db.create_table(table_name, df)
         except Exception:
-            # Create table with inferred schema from data frame
             self.db.create_table(table_name, df)
 
     def search(
@@ -86,7 +80,6 @@ class VectorStore:
     ) -> List[Dict]:
         """Semantic search for similar code entities"""
         table = self.db.open_table("code_entities")
-
         query = table.search(embedding).limit(k)
 
         if filters:
@@ -102,15 +95,34 @@ class VectorStore:
         results = query.to_list()
         return results
 
-    def get_by_file(self, repo_id: str, file_path: str) -> List[Dict]:
-        """Get all entities in a specific file (non-vector filter)"""
+    def get_by_id(self, entity_id: str) -> Optional[Dict]:
+        """Fetch a single entity by ID using server-side filtering"""
         table = self.db.open_table("code_entities")
         try:
-            df = table.to_pandas()
-            if df.empty:
-                return []
-            filtered = df[(df["repo_id"] == repo_id) & (df["file_path"] == file_path)]
-            return filtered.to_dict(orient="records")
+            res = table.query().where(f"id = '{entity_id}'").limit(1).to_list()
+            return res[0] if res else None
+        except Exception as e:
+            print(f"VectorStore.get_by_id error: {e}")
+            return None
+
+    def query_where(self, where: str, limit: Optional[int] = None) -> List[Dict]:
+        """Generic WHERE query helper"""
+        table = self.db.open_table("code_entities")
+        try:
+            q = table.query().where(where)
+            if limit:
+                q = q.limit(limit)
+            return q.to_list()
+        except Exception as e:
+            print(f"VectorStore.query_where error: {e}")
+            return []
+
+    def get_by_file(self, repo_id: str, file_path: str) -> List[Dict]:
+        """Get all entities in a specific file using server-side filtering"""
+        table = self.db.open_table("code_entities")
+        try:
+            where = f"repo_id = '{repo_id}' AND file_path = '{file_path}'"
+            return table.query().where(where).to_list()
         except Exception as e:
             print(f"VectorStore.get_by_file error: {e}")
             return []
@@ -126,13 +138,13 @@ class VectorStore:
         table.delete(f"repo_id = '{repo_id}' AND file_path = '{file_path}'")
 
     def count_entities(self, repo_id: str) -> int:
-        """Count total entities for a repository"""
+        """Count total entities for a repository (filtered server-side)"""
         table = self.db.open_table("code_entities")
         try:
-            df = table.to_pandas()
-            if df.empty:
-                return 0
-            return int((df["repo_id"] == repo_id).sum())
+            # Select only ids to minimize memory
+            where = f"repo_id = '{repo_id}'"
+            ids = table.query().where(where).select(["id"]).to_list()
+            return len(ids)
         except Exception as e:
             print(f"VectorStore.count_entities error: {e}")
             return 0

@@ -3,7 +3,6 @@ import os
 import subprocess
 from typing import Dict
 
-
 def run_depcruise(repo_path: str, src_dir: str | None = None) -> Dict:
     """
     Run dependency-cruiser for JS/TS module dependency graph.
@@ -12,11 +11,14 @@ def run_depcruise(repo_path: str, src_dir: str | None = None) -> Dict:
     base = src_dir or "src"
     target_dir = base if os.path.isdir(os.path.join(repo_path, base)) else "."
     try:
-        # Use npx; dependency-cruiser must be available in PATH or project dev deps
-        cmd = ["npx", "--yes", "dependency-cruiser", "-f", "json", target_dir]
+        cmd = ["npx", "--yes", "dependency-cruiser", "-f", "json"]
+        # If tsconfig.json exists, pass it to improve resolution
+        tsconfig_path = os.path.join(repo_path, "tsconfig.json")
+        if os.path.isfile(tsconfig_path):
+            cmd += ["--ts-config", "tsconfig.json"]
+        cmd.append(target_dir)
         proc = subprocess.run(cmd, cwd=repo_path, capture_output=True, text=True, timeout=180)
         if proc.returncode != 0:
-            # Return empty if not available
             return {"nodes": [], "edges": []}
         data = json.loads(proc.stdout or "{}")
         modules = data.get("modules") or []

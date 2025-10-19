@@ -1,4 +1,4 @@
-# src/codecontext/api/routes/agent_feedback.py
+
 from fastapi import APIRouter, Depends, Request
 from typing import List, Dict, Optional
 from pydantic import BaseModel
@@ -7,9 +7,9 @@ import json
 from pathlib import Path
 from ...api.dependencies import authorize
 from ...utils.responses import success_response
+from ...storage.retrieval_profile import RetrievalProfileStore
 
 router = APIRouter(prefix="/agent", tags=["Agent Feedback"], dependencies=[Depends(authorize)])
-
 
 class ExecutionFeedback(BaseModel):
     """Feedback from agent execution"""
@@ -21,7 +21,6 @@ class ExecutionFeedback(BaseModel):
     entities_missing: Optional[List[Dict]] = None
     execution_result: Dict
     duration_seconds: Optional[float] = None
-
 
 class ChangeSuccessFeedback(BaseModel):
     """Feedback on code changes"""
@@ -37,13 +36,10 @@ class ChangeSuccessFeedback(BaseModel):
     tests_failed: Optional[int] = None
     success: bool
 
-
 @router.post("/feedback/execution")
 def record_execution_feedback(request: Request, feedback: ExecutionFeedback):
     """
-    Record feedback from agent execution
-    
-    This helps RAG learn which retrieval strategies work
+    Record feedback from agent execution and tune retrieval.
     """
     # Store feedback for analysis
     feedback_store = _get_feedback_store()
@@ -65,23 +61,25 @@ def record_execution_feedback(request: Request, feedback: ExecutionFeedback):
         "had_missing": len(feedback.entities_missing or []) > 0,
         "success": feedback.execution_result.get("success", False)
     }
+
+    # Update per-repo RetrievalProfile heuristics
+    rp = RetrievalProfileStore()
+    rp.update_from_execution(feedback.repo_id, effectiveness)
     
     data = {
         "recorded": True,
         "task_id": feedback.task_id,
         "effectiveness": effectiveness,
-        "message": "Feedback recorded. RAG will learn from this execution."
+        "message": "Feedback recorded. RAG will learn from this execution.",
+        "retrieval_profile": rp.load(feedback.repo_id).__dict__
     }
     
     return success_response(request, data)
 
-
 @router.post("/feedback/change")
 def record_change_feedback(request: Request, feedback: ChangeSuccessFeedback):
     """
-    Record feedback on code changes
-    
-    This helps RAG improve dependency analysis accuracy
+    Record feedback on code changes and tune dependency heuristics.
     """
     feedback_store = _get_feedback_store()
     
@@ -97,6 +95,10 @@ def record_change_feedback(request: Request, feedback: ChangeSuccessFeedback):
     predicted = feedback.blast_radius_predicted
     actual = feedback.blast_radius_actual
     accuracy = 1.0 - abs(predicted - actual) / max(1, max(predicted, actual))
+
+    # Update per-repo RetrievalProfile heuristics
+    rp = RetrievalProfileStore()
+    rp.update_from_change(feedback.repo_id, accuracy, feedback.success)
     
     data = {
         "recorded": True,
@@ -107,11 +109,11 @@ def record_change_feedback(request: Request, feedback: ChangeSuccessFeedback):
             "failed": feedback.tests_failed,
             "total": (feedback.tests_passed or 0) + (feedback.tests_failed or 0)
         },
-        "message": "Change feedback recorded. This will improve dependency predictions."
+        "message": "Change feedback recorded. This will improve dependency predictions.",
+        "retrieval_profile": rp.load(feedback.repo_id).__dict__
     }
     
     return success_response(request, data)
-
 
 @router.get("/feedback/summary")
 def get_feedback_summary(
@@ -121,11 +123,8 @@ def get_feedback_summary(
 ):
     """
     Get summary of feedback received
-    
-    Useful for monitoring agent effectiveness
     """
     feedback_store = _get_feedback_store()
-    
     all_feedback = _load_feedback(feedback_store)
     
     # Filter
@@ -192,6 +191,14 @@ def get_feedback_summary(
     
     return success_response(request, data)
 
+@router.get("/feedback/profile")
+def get_retrieval_profile(request: Request, repo_id: str):
+    """
+    Fetch current RetrievalProfile for a repository.
+    """
+    rp = RetrievalProfileStore()
+    prof = rp.load(repo_id)
+    return success_response(request, asdict(prof))
 
 def _get_feedback_store() -> Path:
     """Get path to feedback storage"""
@@ -199,12 +206,10 @@ def _get_feedback_store() -> Path:
     store_path.parent.mkdir(parents=True, exist_ok=True)
     return store_path
 
-
 def _append_feedback(store_path: Path, feedback: Dict):
     """Append feedback to JSONL file"""
     with open(store_path, 'a') as f:
         f.write(json.dumps(feedback) + '\n')
-
 
 def _load_feedback(store_path: Path) -> List[Dict]:
     """Load all feedback from JSONL file"""
