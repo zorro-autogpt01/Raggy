@@ -184,7 +184,17 @@ class Indexer:
         except Exception as e:
             print(f"Lexical index (incremental) failed for {repo_id}: {e}")
 
+        try:
+            if self.cache:
+                prefix = f"repo:{repo_id}|"
+                removed = self.cache.invalidate_prefix(prefix)
+                if removed:
+                    print(f"Retrieval cache invalidated for {repo_id}: {removed} entry(ies)")
+        except Exception as e:
+            print(f"Cache invalidation failed (incremental) for {repo_id}: {e}")
+
         return {'status': 'completed', 'mode': 'incremental', 'files_updated': result['files_updated'], 'entities_updated': result['entities_updated']}
+
 
     def _sync_graphs_to_neo4j(self, repo_id: str):
         if not settings.neo4j_enabled:
@@ -473,6 +483,17 @@ class Indexer:
             print(f"Warning: failed to save index metadata for {repo_id}: {e}")
 
         self._sync_graphs_to_neo4j(repo_id)
+
+        # NEW: Invalidate retrieval cache for this repo
+        try:
+            if self.cache:
+                prefix = f"repo:{repo_id}|"
+                removed = self.cache.invalidate_prefix(prefix)
+                if removed:
+                    print(f"Retrieval cache invalidated for {repo_id}: {removed} entry(ies)")
+        except Exception as e:
+            print(f"Cache invalidation failed for {repo_id}: {e}")
+
 
         result = {
             'status': 'completed',
